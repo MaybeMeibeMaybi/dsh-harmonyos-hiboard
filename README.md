@@ -185,13 +185,62 @@ dsh 会在**每个会话**里自动加载它。现成模板见
 │   ├── images/                                真机截图（卡片 / 历史 / 详情页）
 │   ├── DEPLOY.md                              从零部署（含排错表）
 │   ├── CARD-CONTRACT.md                       负载契约 / 卡片形态 / 错误码
-│   └── AGENTS-rule.md                         全局推送规则模板
+│   ├── AGENTS-rule.md                         全局推送规则模板
+│   └── UPDATES-2026-09-23.md                  演进汇总（含 token 推送插件）
 └── src/
     ├── lib/index.js                           插件源码（兼容性修复版）
     ├── lib/index.js.upstream-backup           上游原始版本，便于比对
     ├── package.json
-    └── cordis.patch.yml                       bundle 补丁（挂载插件用）
+    ├── cordis.patch.yml                       bundle 补丁（挂载插件用）
+    └── token-broadcast/                       ★ 启动即推送 token 的插件
+        ├── lib/index.js
+        └── package.json
 ```
+
+---
+
+## 进阶用法：dsh 每次启动自动推一张 token 卡片
+
+`src/token-broadcast/` 是一个独立插件，解决一个很实际的问题：
+**dsh 的会话 token 只在启动时打印一次到 stdout、不落盘**，
+而手机上经常要用到它（例如给 HTTPS 网关授权会话），手工翻日志很麻烦。
+
+它做两件事：
+
+1. 等 dsh 启动器把 token 写进 `<用户目录>/.dsh/lan/web-state.json`
+2. 用它推一张只含 token 的负一屏卡片（**必须带非空 `scheduleTaskId`**，否则不渲染正文）
+3. 可选：把 token 用**注册密钥**上报给你自己的网关，让浏览器只输密码即可进入
+
+安装与配置：
+
+```bash
+dsh plugin --profile web add "file:E:/dsh-vendor/dsh-token-broadcast"
+```
+
+`~/.dsh/profiles/web/cordis.patch.yml`：
+
+```yaml
+- insert:
+    - id: token-broadcast
+      name: dsh-token-broadcast
+      config:
+        enabled: true
+        authCode: <AUTH_CODE>
+        scheduleId: dsh_token_notice
+        # 可选：网关注册（见 dsh-aliyun-relay-access 项目）
+        registerUrl: 'https://<服务器IP>:18443/__gw_register'
+        registerKeyPath: 'E:\DSH\dsh-tunnel\secrets\gw-register-key.txt'
+        registerInsecure: true    # 网关用自签证书时；对负一屏仍保持严格校验
+```
+
+### 两个实测教训（写在了源码注释里）
+
+1. **schemastery 的 `.default()` 不会随 `{...Config}` 展开生效** ——
+   `Config` 是 schema 对象，展开只能拿到 schema 自身属性，拿不到默认值。
+   所以默认值写成独立常量 `DEFAULTS` 并在 `apply()` 里显式兜底，否则请求 URL 会是空。
+2. **HIBoard 接口要求 `x-trace-id` 请求头**，缺了返回
+   `{"code":"0000500001","desc":"Parameter x-trace-id is empty"}`。
+   格式与官方客户端一致：`task-push-<yyyyMMddHHmmss>`。
 
 ---
 

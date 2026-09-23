@@ -31,3 +31,14 @@ tmp/
 temp/
 *.bak-*
 !src/lib/index.js.upstream-backup
+
+# ---- secrets / credentials (never commit) ----
+secrets/
+*register-key*
+*.pfx
+*.p12
+ca-key.pem
+gateway.env
+# CA certs for phone install are safe to publish, but keep local copies out:
+!ca-for-phone/*.cer
+!ca-for-phone/*.crt

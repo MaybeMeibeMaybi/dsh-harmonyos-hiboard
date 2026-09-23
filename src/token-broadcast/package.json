@@ -1,0 +1,13 @@
+{
+  "name": "dsh-token-broadcast",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Push the dsh session token to the phone's HarmonyOS assistant-today card whenever dsh starts, so it never has to be dug out of a log by hand.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": { ".": "./lib/index.js", "./package.json": "./package.json" },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0-rc.1 <5.0.0-0",
+    "@deepseek-ai/schemastery": ">=3.0.0-rc.1 <4.0.0-0"
+  }
+}
