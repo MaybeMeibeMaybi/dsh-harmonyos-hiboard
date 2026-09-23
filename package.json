@@ -1,0 +1,55 @@
+{
+  "name": "dsh-harmonyos-hiboard",
+  "version": "0.2.0",
+  "description": "Push DeepSeek Harness (dsh) task results to Huawei HarmonyOS assistant-today service cards. Fixed for dsh 0.1.5 / cordis 4, with documentation of the card rendering contract.",
+  "author": "Jim Chen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MaybeMeibeMaybi/dsh-harmonyos-hiboard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MaybeMeibeMaybi/dsh-harmonyos-hiboard/issues"
+  },
+  "homepage": "https://github.com/MaybeMeibeMaybi/dsh-harmonyos-hiboard#readme",
+  "type": "module",
+  "main": "src/lib/index.js",
+  "exports": {
+    ".": "./src/lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "keywords": [
+    "harmonyos",
+    "harmonyos-next",
+    "hiboard",
+    "assistant-today",
+    "negative-one-screen",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "service-card",
+    "notification",
+    "markdown",
+    "cordis"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./src/cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0-rc.1 <5.0.0-0",
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0",
+    "@deepseek-ai/schemastery": ">=3.0.0-rc.1 <4.0.0-0"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

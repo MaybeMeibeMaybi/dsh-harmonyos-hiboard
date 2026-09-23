@@ -1,0 +1,53 @@
+# NOTICE
+
+## Upstream
+
+This project is based on **`dsh-hiboard-push`** by **Entity-Him**, licensed under the MIT License:
+
+- Repository: https://github.com/Entity-Him/dsh-hiboard-push
+- (GitHub redirects this to its current location: https://github.com/QinpanWan/dsh-hiboard-push)
+- Copyright (c) 2026 Entity-Him
+
+The upstream MIT license text is reproduced in [`LICENSE`](LICENSE), and the unmodified
+upstream source is kept in [`src/lib/index.js.upstream-backup`](src/lib/index.js.upstream-backup)
+so the differences below can be audited directly.
+
+## Changes in this distribution
+
+1. **Compatibility fix for dsh 0.1.5 / cordis 4.**
+   Upstream imports `installSettingsSection` and `settingsNamespace` from
+   `@deepseek-ai/dsh-settings`. Those exports no longer exist in the dsh version this was
+   built against, and the plugin made dsh fail at boot with:
+
+   ```
+   TypeError: Cannot read properties of undefined (reading 'validate')   (Config)
+   SyntaxError: The requested module '@deepseek-ai/dsh-settings'
+                does not provide an export named 'installSettingsSection'
+   ```
+
+   This distribution removes the settings-panel registration (which no longer exists in the
+   host) and takes the auth code from the plugin's own cordis entry config instead.
+   **Push behaviour is otherwise unchanged.**
+
+2. **Configuration moves to the profile patch layer.**
+   The auth code is read from `~/.dsh/profiles/web/cordis.patch.yml`
+   (`hiboard-push.config.authCode`). It must NOT go into `~/.dsh/.env`: the variable
+   `DSH_HIBOARD_AUTH_CODE` is bootstrap-only and makes dsh refuse to start.
+
+3. **Added documentation.**
+   `docs/CARD-CONTRACT.md` (payload fields, card shapes, error codes),
+   `docs/DEPLOY.md` (zero-to-working deployment), and `docs/AGENTS-rule.md`
+   (how to make every agent turn push a card).
+
+4. **Documented a card-rendering finding.**
+   Measured against the live service: a push whose `scheduleTaskId` is empty renders as a
+   summary-only row with no visible body and a dead deep link, while a non-empty
+   `scheduleTaskId` opens a full detail page that renders the whole Markdown body.
+   Always pass `schedule_id`.
+
+## Compatibility note
+
+The network contract (`POST .../msg/upload`, the 8 `msgContent` fields, `source: "OpenClaw"`,
+the 5000-character limit, and the `0000000000` / `0000900034` result codes) is unchanged from
+upstream and was cross-checked against the official `today-task` skill and the independent
+Rust implementation [`lichtcui/hwpush`](https://github.com/lichtcui/hwpush).

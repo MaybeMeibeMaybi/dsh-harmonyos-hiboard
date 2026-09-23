@@ -1,0 +1,33 @@
+# ---- Node / npm ----
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+package-lock.json
+pnpm-lock.yaml
+
+# ---- Logs and runtime state ----
+*.log
+logs/
+
+# ---- Secrets: never commit credentials ----
+# The HiBoard auth code goes in ~/.dsh/profiles/web/cordis.patch.yml, NOT in this repo.
+.env
+.env.*
+*.pem
+*.key
+*dsh_aliyun*
+credential*
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.swp
+
+# ---- Local scratch ----
+tmp/
+temp/
+*.bak-*
+!src/lib/index.js.upstream-backup

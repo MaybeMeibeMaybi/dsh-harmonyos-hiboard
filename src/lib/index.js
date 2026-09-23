@@ -1,0 +1,375 @@
+/**
+ * dsh-hiboard-push — Huawei assistant-today (负一屏) task-completion push
+ *
+ * A dsh plugin that pushes task-completion messages to the Huawei HarmonyOS
+ * negative-one-screen ("Today" / 智慧助手·今天) card feed. It is wire-compatible
+ * with the OpenClaw `today-task` skill: the same HIBoard upload endpoint, the
+ * same `{ data: { authCode, msgContent } }` payload contract, and the same
+ * card rendering rules (standard / periodic / summary-only cards all derive
+ * from which fields are filled).
+ *
+ * The agent-facing face is a `hiboard_push` tool (plus a `hiboard_verify`
+ * onboarding tool), so a finished task can be pushed in the same turn it
+ * completes. The authCode is resolved at call time from, in order:
+ *   1. the `hiboard-push` settings section (dsh Settings UI / settings.yaml)
+ *   2. the plugin's cordis entry `config.authCode`
+ *   3. the `DSH_HIBOARD_AUTH_CODE` environment variable
+ *
+ * No runtime npm dependencies beyond the dsh peer packages: HTTP uses the
+ * Node built-in `fetch`.
+ */
+import { randomUUID } from "node:crypto";
+import { defineTool } from "@deepseek-ai/dsh-tools";
+import z from "@deepseek-ai/schemastery";
+
+// ---------------------------------------------------------------- identity
+
+const name = "hiboard-push";
+const inject = ["tools"];
+
+// ---------------------------------------------------------------- constants
+
+/** HIBoard upload endpoint used by today-task >= 1.0.16 and hwpush. */
+const DEFAULT_SERVICE_URL =
+	"https://hiboard-claw-drcn.ai.dbankcloud.cn/distribution/message/cloud/claw/msg/upload";
+
+const DEFAULT_TIMEOUT_MS = 30000;
+const DEFAULT_MAX_CONTENT_LENGTH = 5000;
+const DEFAULT_RESULT = "任务已完成";
+
+/**
+ * The HIBoard contract brands cards by this value; both the official
+ * today-task skill and hwpush send exactly this string, so it is kept as-is
+ * for wire compatibility.
+ */
+const WIRE_SOURCE = "OpenClaw";
+
+/** Environment fallback for the authCode. */
+const AUTH_CODE_ENV = "DSH_HIBOARD_AUTH_CODE";
+
+/** Success codes accepted by the official client (string or numeric zero). */
+const SUCCESS_CODES = new Set(["0000000000", "0"]);
+
+/** Known error-code hints surfaced verbatim to the agent. */
+const KNOWN_ERROR_HINTS = {
+	"0000900034": "授权码无效（authCode is invalid），请到 负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体 重新获取。"
+};
+
+
+/** Settings-section + composition-entry schema (all optional; validated on push). */
+const Config = z.object({
+	authCode: z.string().role("secret"),
+	pushServiceUrl: z.string().default(DEFAULT_SERVICE_URL),
+	timeoutMs: z.number().default(DEFAULT_TIMEOUT_MS),
+	maxContentLength: z.number().default(DEFAULT_MAX_CONTENT_LENGTH),
+	defaultResult: z.string().default(DEFAULT_RESULT)
+});
+
+const entryDefaults = {
+	authCode: "",
+	pushServiceUrl: DEFAULT_SERVICE_URL,
+	timeoutMs: DEFAULT_TIMEOUT_MS,
+	maxContentLength: DEFAULT_MAX_CONTENT_LENGTH,
+	defaultResult: DEFAULT_RESULT
+};
+
+// ---------------------------------------------------------------- payload
+
+/**
+ * Build the exact HIBoard upload body. The `content` field carries the full
+ * Markdown body (rendered verbatim on the card); `scheduleTaskId` groups
+ * periodic-task cards together; an empty `scheduleTaskId` yields the
+ * one-off standard card.
+ */
+export function buildPayload({ authCode, name, content, result, scheduleId }) {
+	const nowSec = Math.floor(Date.now() / 1000);
+	return {
+		data: {
+			authCode,
+			msgContent: [
+				{
+					msgId: `dsh_${nowSec}_${randomUUID().slice(0, 8)}`,
+					scheduleTaskId: scheduleId ?? "",
+					scheduleTaskName: name,
+					summary: name,
+					result,
+					content,
+					source: WIRE_SOURCE,
+					taskFinishTime: nowSec
+				}
+			]
+		}
+	};
+}
+
+/** Normalize Markdown body: strip JSON-style escaped newlines, keep length safe. */
+export function normalizeContent(content) {
+	if (typeof content !== "string") return "";
+	let text = content;
+	if (text.includes("\\n") && !text.includes("\n")) text = text.replace(/\\n/g, "\n");
+	text = text.replace(/\\t/g, "\t").replace(/\\r/g, "\r").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+	return text.trim();
+}
+
+/** Validate a push intent; returns a list of human-readable problems. */
+export function validatePush({ name, content, result, maxContentLength }) {
+	const problems = [];
+	const trimmedName = (name ?? "").trim();
+	const trimmedContent = normalizeContent(content);
+	if (!trimmedName) problems.push("任务名称（name）不能为空");
+	if (!trimmedContent) problems.push("任务内容（content）不能为空");
+	const limit = Number(maxContentLength) > 0 ? Number(maxContentLength) : DEFAULT_MAX_CONTENT_LENGTH;
+	if (trimmedContent.length > limit) problems.push(`任务内容超出长度限制（${limit} 字符），当前 ${trimmedContent.length} 字符`);
+	if (result !== void 0 && result !== null && String(result).trim() === "") problems.push("执行结果（result）不能为空字符串");
+	return problems;
+}
+
+// ---------------------------------------------------------------- client
+
+/** Send the payload; resolves to a stable { success, code, message } summary. */
+export async function sendPush(url, payload, { timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), timeoutMs);
+	let combined = controller.signal;
+	if (signal) {
+		try {
+			combined = AbortSignal.any([controller.signal, signal]);
+		} catch {
+			/* non-AbortSignal exec signal: fall back to the local timeout only */
+		}
+	}
+	const traceId = `task-push-${new Date().toISOString().replace(/[-T:.Z]/g, "").slice(0, 14)}`;
+	try {
+		const response = await fetch(url, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json; charset=utf-8",
+				"user-agent": "OpenClaw-TaskPusher/2.0",
+				"x-trace-id": traceId
+			},
+			body: JSON.stringify(payload),
+			signal: combined
+		});
+		const text = await response.text().catch(() => "");
+		let json = null;
+		try {
+			json = text === "" ? null : JSON.parse(text);
+		} catch {
+			/* non-JSON body */
+		}
+		const code = json && typeof json.code === "string" ? json.code : "";
+		const message = json && typeof json.message === "string"
+			? json.message
+			: json && typeof json.desc === "string" ? json.desc : text.slice(0, 200);
+		if (!response.ok) {
+			return { success: false, code, message: `HTTP ${response.status}: ${message}` };
+		}
+		if (SUCCESS_CODES.has(code)) return { success: true, code, message };
+		const hint = KNOWN_ERROR_HINTS[code];
+		return { success: false, code, message: hint ? `${message} ${hint}` : message };
+	} catch (error) {
+		const aborted = error && typeof error === "object" && (error.name === "AbortError" || error.name === "TimeoutError");
+		return {
+			success: false,
+			code: "",
+			message: aborted ? `请求超时（${timeoutMs}ms）或已中止` : `网络错误: ${error instanceof Error ? error.message : String(error)}`
+		};
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+// ---------------------------------------------------------------- tool defs
+
+function presentPushCall(args) {
+	return {
+		card: "generic",
+		title: "Push to Huawei Today",
+		kind: "write",
+		...args.name === void 0 ? {} : { rawInput: String(args.name) }
+	};
+}
+
+function renderPushResult(_args, value) {
+	const lines = [];
+	if (value.dryRun) {
+		lines.push(`[dry-run] 负载已构造，未发送（${value.taskName}）`);
+	} else if (value.success) {
+		lines.push(`✅ 已推送到华为负一屏：${value.taskName}`);
+		lines.push(`   状态码: ${value.code}`);
+	} else {
+		lines.push(`❌ 推送失败：${value.taskName}`);
+		lines.push(`   状态码: ${value.code || "-"}`);
+		if (value.message) lines.push(`   原因: ${value.message}`);
+	}
+	return [{ type: "text", text: lines.join("\n") }];
+}
+
+const pushOutputSchema = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		success: { type: "boolean", required: true },
+		code: { type: "string", required: true },
+		message: { type: "string", required: true },
+		taskName: { type: "string", required: true },
+		pushedAt: { type: "string", required: true },
+		dryRun: { type: "boolean", required: true }
+	}
+};
+
+function hiboardPushTool({ resolveAuthCode, settings }) {
+	return defineTool({
+		name: "hiboard_push",
+		description: "Push a task-completion message to the Huawei HarmonyOS assistant-today (负一屏) card feed, wire-compatible with the OpenClaw today-task skill. The Markdown content is rendered verbatim on the phone card (standard / periodic / summary-only card styles depend on which fields are filled). Use when a task finishes and the user wants the result on their phone's negative-one-screen.",
+		parameters: {
+			name: {
+				type: "string",
+				required: true,
+				description: "任务名称，显示在负一屏卡片标题（也是 scheduleTaskName 与 summary）。"
+			},
+			content: {
+				type: "string",
+				required: true,
+				description: `任务内容（Markdown 正文），最多 ${DEFAULT_MAX_CONTENT_LENGTH} 字符，将完整保留格式渲染在卡片中。`
+			},
+			result: {
+				type: "string",
+				description: "执行结果摘要（卡片状态标签），默认「任务已完成」。"
+			},
+			schedule_id: {
+				type: "string",
+				description: "周期任务 ID：周期性任务保持同一 ID 以便在负一屏分组展示；留空则为一次性标准任务卡片。"
+			},
+			dry_run: {
+				type: "boolean",
+				description: "仅构造并校验请求负载，不真正发送（用于验证格式与授权码是否已配置）。"
+			}
+		},
+		output: {
+			schema: pushOutputSchema,
+			render: renderPushResult
+		},
+		isConcurrencySafe: () => true,
+		presentCall: presentPushCall,
+		async execute(args, exec) {
+			const name = String(args.name ?? "").trim();
+			const content = normalizeContent(args.content);
+			const result = (args.result !== void 0 && args.result !== null && String(args.result).trim() !== "")
+				? String(args.result).trim()
+				: settings().defaultResult || DEFAULT_RESULT;
+			const problems = validatePush({ name, content, result, maxContentLength: settings().maxContentLength });
+			if (problems.length > 0) throw new Error(`hiboard_push: ${problems.join("；")}`);
+
+			const pushedAt = new Date().toISOString();
+
+			// dry-run constructs and validates the payload without sending; it does
+			// not require an authCode (mirrors hwpush --dry-run behaviour).
+			if (args.dry_run) {
+				return { success: true, code: "", message: "dry-run", taskName: name, pushedAt, dryRun: true };
+			}
+
+			const authCode = resolveAuthCode();
+			if (!authCode) {
+				throw new Error(
+					"hiboard_push: 未配置授权码（authCode）。请先在 dsh 设置面板的 hiboard-push 分区填写，或设置环境变量 " +
+					`${AUTH_CODE_ENV}。授权码获取：负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体。`
+				);
+			}
+
+			const payload = buildPayload({ authCode, name, content, result, scheduleId: args.schedule_id });
+
+			const outcome = await sendPush(settings().pushServiceUrl, payload, {
+				timeoutMs: settings().timeoutMs,
+				signal: exec?.signal
+			});
+			return {
+				success: outcome.success,
+				code: outcome.code,
+				message: outcome.message,
+				taskName: name,
+				pushedAt,
+				dryRun: false
+			};
+		}
+	});
+}
+
+function hiboardVerifyTool({ resolveAuthCode, settings }) {
+	return defineTool({
+		name: "hiboard_verify",
+		description: "Verify the Huawei assistant-today (负一屏) push configuration by sending a minimal real connection-test card to the phone (like the OpenClaw today-task skill's connection test). Use after configuring the authCode to confirm the setup works end to end.",
+		parameters: {},
+		output: {
+			schema: pushOutputSchema,
+			render: renderPushResult
+		},
+		isConcurrencySafe: () => true,
+		presentCall: () => ({ card: "generic", title: "Verify Huawei Today push", kind: "write" }),
+		async execute(_args, exec) {
+			const authCode = resolveAuthCode();
+			if (!authCode) {
+				throw new Error(
+					"hiboard_verify: 未配置授权码（authCode）。请先在 dsh 设置面板的 hiboard-push 分区填写，或设置环境变量 " +
+					`${AUTH_CODE_ENV}。授权码获取：负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体。`
+				);
+			}
+			const name = "dsh 连接测试";
+			const payload = buildPayload({
+				authCode,
+				name,
+				content: "# dsh 连接测试\n\n如果您的手机收到此卡片，说明 dsh-hiboard-push 已配置成功。",
+				result: "测试成功",
+				scheduleId: ""
+			});
+			const pushedAt = new Date().toISOString();
+			const outcome = await sendPush(settings().pushServiceUrl, payload, {
+				timeoutMs: settings().timeoutMs,
+				signal: exec?.signal
+			});
+			return {
+				success: outcome.success,
+				code: outcome.code,
+				message: outcome.message,
+				taskName: name,
+				pushedAt,
+				dryRun: false
+			};
+		}
+	});
+}
+
+// ---------------------------------------------------------------- plugin
+
+function apply(ctx, rawConfig) {
+	const entry = { ...entryDefaults, ...(rawConfig ?? {}) };
+	let source = () => entry;
+
+	const settings = () => {
+		const resolved = source();
+		return {
+			authCode: resolved.authCode ?? "",
+			pushServiceUrl: resolved.pushServiceUrl || DEFAULT_SERVICE_URL,
+			timeoutMs: Number(resolved.timeoutMs) > 0 ? Number(resolved.timeoutMs) : DEFAULT_TIMEOUT_MS,
+			maxContentLength: Number(resolved.maxContentLength) > 0 ? Number(resolved.maxContentLength) : DEFAULT_MAX_CONTENT_LENGTH,
+			defaultResult: resolved.defaultResult || DEFAULT_RESULT
+		};
+	};
+
+	const resolveAuthCode = () => {
+		const fromSettings = settings().authCode.trim();
+		if (fromSettings) return fromSettings;
+		const fromEnv = (process.env[AUTH_CODE_ENV] ?? "").trim();
+		if (fromEnv) return fromEnv;
+		return "";
+	};
+
+	ctx.tools.register(hiboardPushTool({ resolveAuthCode, settings }));
+	ctx.tools.register(hiboardVerifyTool({ resolveAuthCode, settings }));
+
+	ctx.logger?.info?.("[hiboard-push] started; authCode %s, endpoint %s",
+		resolveAuthCode() ? "configured" : "MISSING (set DSH_HIBOARD_AUTH_CODE or the hiboard-push settings section)",
+		settings().pushServiceUrl);
+}
+
+export { apply, Config, inject, name };
