@@ -239,7 +239,12 @@ function hiboardPushTool({ resolveAuthCode, settings }) {
 			},
 			schedule_id: {
 				type: "string",
-				description: "周期任务 ID：周期性任务保持同一 ID 以便在负一屏分组展示；留空则为一次性标准任务卡片。"
+				// 【必填，别改成可选】scheduleTaskId 为空时，负一屏只显示一行标题：
+				// 正文完全不渲染、「进任务」深链也点不动（本项目 CARD-CONTRACT.md 实测结论）。
+				// 2026-09-27 真实事故：agent 两次省略这个参数，用户拿到的就是两张点不开的卡片。
+				// 所以这里声明 required，让**调用契约本身**强制模型每次都带上它。
+				required: true,
+				description: "周期任务 ID，**必填且不能为空**：同一会话用同一个 ID 可在负一屏分组（例如 dsh_worklog）。留空会导致卡片只有一行标题、点不开详情页、正文不显示。"
 			},
 			dry_run: {
 				type: "boolean",

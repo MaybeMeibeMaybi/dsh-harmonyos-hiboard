@@ -17,7 +17,11 @@
  *
  *   C. 工具真的调用了，但**返回失败**（网络抖动/超时），模型没有重试。
  *
- * ## 三级兜底
+ *   D. 工具调用**漏了 `schedule_id`**（或传了空串）→ 卡片能到手机，但
+ *      **只有一行标题、正文不渲染、详情页点不开**。用户 2026-09-27 实际遇到：
+ *      "只能看见一句话，点不开"。这类卡片等于白推。
+ *
+ * ## 三级兜底 + 一条硬约束
  *
  *   L1 rescue （rescueEnabled）
  *      正文里出现字面量调用 → 用**同一个解析器**还原参数并代为推送。
@@ -27,6 +31,10 @@
  *   L3 retry  （retryEnabled）
  *      包一层 hiboard_push 的 execute：失败分类后重试（瞬时错误才重试，
  *      授权码无效/内容过长这类永久错误不重试），并把每次结果写进审计日志。
+ *   ★ schedule_id 硬约束（defaultScheduleId）
+ *      同一层包装里，调用参数若缺 `schedule_id` 或为空串，**自动补成默认值**。
+ *      这样"到达 HIBoard 的每一张卡片都是能点开的"，不依赖模型记得传参。
+ *      （配合 hiboard-push 侧把 `schedule_id` 声明为 required，形成双保险。）
  *
  * ## 另外两件事
  *
@@ -66,6 +74,7 @@ const DEFAULTS = {
 	retryDelayMs: 2000,
 	retryCount: 1,
 	defaultResult: "任务已完成",
+	defaultScheduleId: "dsh_worklog",
 	stateDir: "",
 	minPromiseLength: 120,
 	auditMaxBytes: 512 * 1024
@@ -89,6 +98,12 @@ export const Config = z.object({
 	retryCount: z.number().default(DEFAULTS.retryCount),
 	/** 兜底卡片的结果标签默认值。 */
 	defaultResult: z.string().default(DEFAULTS.defaultResult),
+	/**
+	 * `hiboard_push` 没带有效 schedule_id 时自动补的值。
+	 * 为什么需要：scheduleTaskId 为空 → 负一屏只显示一行标题、正文不渲染、详情页点不开。
+	 * 与其让用户拿到一张点不开的卡片，不如自动归到同一个分组里。
+	 */
+	defaultScheduleId: z.string().default(DEFAULTS.defaultScheduleId),
 	/** 审计/状态文件目录；留空表示 <用户目录>/.dsh/lan/push-guard。 */
 	stateDir: z.string().default(""),
 	/** L2 的最低正文长度：太短的回答不补推，避免刷屏。 */
@@ -321,14 +336,30 @@ const SUCCESS_RE = /"code"\s*:\s*"(0{10}|0)"/;
 /** 已知永久错误码（重试没有意义）。 */
 const PERMANENT_CODES = new Set(["0000900034"]);
 
-/** 判断一次推送结果：成功 / 可重试 / 永久失败。 */
+/**
+ * 判断一次推送结果：成功 / 可重试 / 永久失败。
+ *
+ * 这里刻意区分三种"看起来不一样但其实是同一件事"的返回：
+ *   1. 工具返回值（`{success:false, code, message}`）—— 优先按 `success` 判；
+ *   2. HIBoard 原始响应（`{"code":"0000000000"}`）；
+ *   3. **既没 success:false、也没有任何 code 的 2xx 响应** —— 视为成功。
+ * 为什么要管第 3 种：万一平台将来不回 `code` 字段了，
+ * 把它误判成"失败"会导致**卡片已经推成功、却再推一遍**，平白多一张重复卡片。
+ * 宁可少重试，也不要制造重复卡片。
+ */
 export function classifyPush(result) {
 	if (!result) return { ok: false, retryable: true, code: "", message: "无响应" };
-	if (result.ok && SUCCESS_RE.test(result.body ?? "")) return { ok: true, retryable: false, code: "", message: "OK" };
-	const codeMatch = /"code"\s*:\s*"([^"]+)"/.exec(result.body ?? "");
+	const body = result.body ?? "";
+	const codeMatch = /"code"\s*:\s*"([^"]+)"/.exec(body);
 	const code = codeMatch ? codeMatch[1] : "";
+	if (result.ok) {
+		if (SUCCESS_RE.test(body)) return { ok: true, retryable: false, code: "", message: "OK" };
+		if (result.success === false) return { ok: false, retryable: !PERMANENT_CODES.has(code), code, message: body };
+		// 2xx 且没有任何失败信号（无 code、或 code 为空/全零样式）→ 认为平台已接受
+		if (!codeMatch) return { ok: true, retryable: false, code: "", message: "OK（响应中无 code 字段，按 2xx 视为已接受）" };
+	}
 	const permanent = PERMANENT_CODES.has(code) || (result.status >= 400 && result.status < 500);
-	return { ok: false, retryable: !permanent, code, message: result.body ?? "" };
+	return { ok: false, retryable: !permanent, code, message: body };
 }
 
 // ---------------------------------------------------------------- 审计 / 状态
@@ -393,16 +424,24 @@ export function apply(ctx, config) {
 		rescueEnabled: settings.rescueEnabled !== false,
 		promiseRescueEnabled: settings.promiseRescueEnabled !== false,
 		retryEnabled: settings.retryEnabled !== false,
+		defaultScheduleId: String(settings.defaultScheduleId || DEFAULTS.defaultScheduleId),
 		stateDir
 	};
 	safeWrite(stateDir, "startup.json", JSON.stringify(startup, null, 2));
 	ctx.logger?.info?.(
-		"[push-guard] 启动自检：authCode=%s；L1 抢救=%s，L2 承诺兜底=%s，L3 重试=%s；状态目录=%s",
-		startup.authCode, startup.rescueEnabled, startup.promiseRescueEnabled, startup.retryEnabled, stateDir
+		"[push-guard] 启动自检：authCode=%s；L1 抢救=%s，L2 承诺兜底=%s，L3 重试=%s；schedule_id 兜底=%s；状态目录=%s",
+		startup.authCode, startup.rescueEnabled, startup.promiseRescueEnabled, startup.retryEnabled,
+		startup.defaultScheduleId, stateDir
 	);
 	if (startup.authCode === "MISSING") {
 		ctx.logger?.warn?.("[push-guard] ⚠️ 未配置 authCode，任何兜底推送都会失败（请检查 hiboard-push / push-guard 配置）");
 	}
+	safeWrite(stateDir, "last-state.json", JSON.stringify({
+		at: new Date().toISOString(),
+		kind: "boot",
+		note: "push-guard 已加载；这条只表示启动，不代表推过卡片",
+		defaultScheduleId: startup.defaultScheduleId
+	}, null, 2));
 
 	// ---- L1 + L2：会话级抢救
 	if (settings.rescueEnabled !== false || settings.promiseRescueEnabled !== false) {
@@ -463,6 +502,8 @@ export function apply(ctx, config) {
 						pushUrl,
 						maxLen,
 						defaultResult: settings.defaultResult || DEFAULTS.defaultResult,
+						// 兜底卡片同样必须是"能点开"的：schedule_id 为空时用默认分组
+						defaultScheduleId: String(settings.defaultScheduleId || DEFAULTS.defaultScheduleId),
 						stateDir,
 						audit
 					});
@@ -500,8 +541,29 @@ export function apply(ctx, config) {
 					}
 					const original = tool.execute;
 					const attempts = Math.max(0, Number(settings.retryCount) >= 0 ? Number(settings.retryCount) : DEFAULTS.retryCount);
+					const fallbackScheduleId = String(settings.defaultScheduleId || DEFAULTS.defaultScheduleId).trim() || DEFAULTS.defaultScheduleId;
 					const wrapped = async (args, exec) => {
-						let outcome = await original(args, exec);
+						// ---- 先补 schedule_id，再让工具校验/发送 ----
+						// 为什么必须补：scheduleTaskId 为空时负一屏**只显示一行标题**，
+						// 正文不渲染、详情页点不开（2026-09-27 用户实际遇到）。
+						// 模型可能漏传，也可能传空串，两种都在这里兜住——
+						// 保证"到达 HIBoard 的每一张卡片都能被点开"。
+						let effectiveArgs = args;
+						try {
+							if (args && typeof args === "object" && !Array.isArray(args)) {
+								const current = typeof args.schedule_id === "string" ? args.schedule_id.trim() : "";
+								if (!current) {
+									effectiveArgs = { ...args, schedule_id: fallbackScheduleId };
+									ctx.logger?.warn?.("[push-guard] hiboard_push 未带有效 schedule_id，已自动补为 %s（否则卡片在手机上点不开）", fallbackScheduleId);
+									audit({ kind: "schedule-id-backfilled", filled: fallbackScheduleId, taskName: String(args.name ?? "").slice(0, 80) });
+								}
+							}
+						} catch (error) {
+							ctx.logger?.warn?.("[push-guard] 补 schedule_id 出错（已忽略，按原参数继续）：%s", error?.message ?? String(error));
+							effectiveArgs = args;
+						}
+
+						let outcome = await original(effectiveArgs, exec);
 						try {
 							let verdict = classifyPush(outcome);
 							let tries = 0;
@@ -512,7 +574,7 @@ export function apply(ctx, config) {
 									verdict.code || "-", settings.retryDelayMs, tries, String(verdict.message).slice(0, 120)
 								);
 								await sleep(Math.max(200, Number(settings.retryDelayMs) || DEFAULTS.retryDelayMs));
-								const next = await original(args, exec);
+								const next = await original(effectiveArgs, exec);
 								if (next && next.success) {
 									audit({ kind: "retry-ok", tries, taskName: next.taskName });
 									return { ...next, message: `${next.message}（首次失败 ${verdict.code || "-"}，已自动重试 ${tries} 次成功）` };
@@ -534,8 +596,8 @@ export function apply(ctx, config) {
 					};
 					wrapped.__pushGuard = true;
 					tool.execute = wrapped;
-					ctx.logger?.info?.("[push-guard] 已接管 hiboard_push：失败分类 + 最多重试 %d 次", attempts);
-					audit({ kind: "hook-installed", retryCount: attempts });
+					ctx.logger?.info?.("[push-guard] 已接管 hiboard_push：失败分类 + 最多重试 %d 次 + schedule_id 缺失自动补 %s", attempts, fallbackScheduleId);
+					audit({ kind: "hook-installed", retryCount: attempts, defaultScheduleId: fallbackScheduleId });
 				} catch (error) {
 					ctx.logger?.warn?.("[push-guard] 包装 hiboard_push 失败（已忽略）：%s", error?.message ?? String(error));
 				}
@@ -711,7 +773,7 @@ function looksLikePushTurn(text) {
 }
 
 /** 真正把兜底卡片推出去，并落审计 + 最后一轮状态。全部错误内部消化。 */
-async function deliver(ctx, { sessionId, turn, card, authCode, pushUrl, maxLen, defaultResult, stateDir, audit }) {
+async function deliver(ctx, { sessionId, turn, card, authCode, pushUrl, maxLen, defaultResult, defaultScheduleId, stateDir, audit }) {
 	const stamp = () => new Date().toISOString();
 	try {
 		if (!authCode) {
@@ -721,12 +783,14 @@ async function deliver(ctx, { sessionId, turn, card, authCode, pushUrl, maxLen, 
 		}
 		let content = card.content;
 		if (content.length > maxLen) content = `${content.slice(0, maxLen - 60)}\n\n> （内容超出 ${maxLen} 字符上限，已截断）`;
+		// 兜底卡片也必须是"可点开"的：scheduleTaskId 为空时负一屏不渲染正文、详情页点不动
+		const finalScheduleId = String(card.scheduleId || "").trim() || String(defaultScheduleId || DEFAULTS.defaultScheduleId);
 		const payload = buildPayload({
 			authCode,
 			name: card.name,
 			content,
 			result: card.result || defaultResult || DEFAULTS.defaultResult,
-			scheduleId: card.scheduleId
+			scheduleId: finalScheduleId
 		});
 		const raw = await postJson(pushUrl, payload);
 		const verdict = classifyPush(raw);
