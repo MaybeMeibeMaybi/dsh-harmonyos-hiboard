@@ -6,9 +6,15 @@
  * 所以做成"随 dsh 启动自动推送一张只含 token 的卡片"。
  *
  * 行为：
- *   1. 等启动器把 token 写进 <用户目录>/.dsh/lan/web-state.json（最多等 120 秒）
+ *   1. 等启动器把**本次**运行的 token 写进 <用户目录>/.dsh/lan/web-state.json（最多等 120 秒）
  *   2. 用 patch 配置里的 authCode 调 HIBoard 接口推一张卡片
  *   3. 卡片**必须带非空 scheduleTaskId**，否则负一屏只显示标题、正文不渲染
+ *
+ * 卡片里的地址必须写**真实 IP**（用户 2026-09-27 明确要求，原来写的是
+ * `<服务器IP>` / `<电脑IP>` 占位符，等于没用）：
+ *   - 网关主机名默认从网关注册地址（registerUrl）的 host 推导，可用 gatewayHost 显式覆盖；
+ *   - 局域网地址里的本机 IP 每次启动**动态探测**：DHCP 换网就会变，
+ *     写死必然过期（2026-09-27 实测同一个上午就从 192.168.0.x 段换到了 192.168.3.x 段）。
  *
  * 可选：如果 PC 上存在网关注册密钥文件，还会把 token 注册给 HTTPS 网关，
  *       这样浏览器登录后无需手工粘贴 token（见 registerKeyPath 配置）。
@@ -17,7 +23,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { request as httpsRequest } from "node:https";
 import z from "@deepseek-ai/schemastery";
@@ -50,6 +56,12 @@ export const Config = z.object({
 	registerKeyPath: z.string().default(""),
 	/** 可选：网关注册地址 */
 	registerUrl: z.string().default(""),
+	/** 可选：卡片里显示的网关主机（形如 1.2.3.4:18443）；留空则从 registerUrl 推导。 */
+	gatewayHost: z.string().default(""),
+	/** 可选：卡片里显示的本机局域网 IP；留空则每次启动动态探测。 */
+	lanIp: z.string().default(""),
+	/** 局域网入口端口（卡片里拼 http://<lanIp>:<port>/?token=...） */
+	lanPort: z.number().default(3081),
 	pushServiceUrl: z.string().default(DEFAULTS.pushServiceUrl)
 });
 
@@ -57,16 +69,58 @@ function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** 读取 token；文件不存在或还没有 token 时返回 undefined。 */
-function readToken(path) {
+/** 第一个非内部 IPv4 地址，与入口代理的默认绑定保持一致（见 dsh-entry-startup）。 */
+function detectLanIp() {
+	for (const addresses of Object.values(networkInterfaces())) {
+		for (const address of addresses ?? []) {
+			if (address.family === "IPv4" && !address.internal) return address.address;
+		}
+	}
+	return "";
+}
+
+/** 从网关注册地址推导卡片里显示的网关主机（host:port），失败返回空串。 */
+function gatewayHostFrom(url) {
+	try {
+		const parsed = new URL(String(url));
+		return parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
+	} catch {
+		return "";
+	}
+}
+
+/**
+ * 读取 token **及其新鲜度标记**。
+ *
+ * web-state.json 不会在 dsh 退出时删除，所以上一次运行留下的 token 会一直躺在里面。
+ * 如果本插件抢在本次启动器写文件之前读到它，就会把**已经失效的旧 token** 推给用户
+ * ——比不推更糟（用户会拿着旧 token 反复试）。因此这里同时读出 pid/startedAt，
+ * 与当前进程比对，只有确认是"本次运行写的"才算数。
+ */
+function readState(path) {
 	try {
 		const text = readFileSync(path, "utf8").replace(/^\uFEFF/, "");
 		const parsed = JSON.parse(text);
 		const token = typeof parsed?.token === "string" ? parsed.token.trim() : "";
-		return token || undefined;
+		if (!token) return undefined;
+		return {
+			token,
+			pid: Number(parsed?.pid) || 0,
+			startedAt: typeof parsed?.startedAt === "string" ? parsed.startedAt : ""
+		};
 	} catch {
 		return undefined;
 	}
+}
+
+/** 状态文件是否属于当前 dsh 进程：pid 一致优先，其次比对启动时间。 */
+function isFresh(state) {
+	if (!state) return false;
+	if (state.pid && state.pid !== process.pid) return false;
+	const startedMs = Date.parse(state.startedAt);
+	if (!Number.isFinite(startedMs)) return true; // 老格式没有 startedAt：pid 能对上就用
+	// 进程启动时间不可能晚于状态文件写入时间；给 5 分钟容差防止时钟抖动误判。
+	return startedMs >= Date.now() - 5 * 60 * 1000;
 }
 
 /** POST JSON，返回 { ok, status, body }。不抛出，交给调用方判断。
@@ -127,25 +181,48 @@ export function apply(ctx, config) {
 		let cancelled = false;
 
 		(async () => {
-			// 1) 等启动器写入 token
+			// 1) 等启动器写入**本次运行**的 token（旧文件里的陈旧 token 不算数）
 			const deadline = Date.now() + Math.max(5000, Number(settings.waitMs) || 120000);
-			let token;
+			let state;
+			let sawStale = false;
 			while (!cancelled && Date.now() < deadline) {
-				token = readToken(statePath);
-				if (token) break;
+				const candidate = readState(statePath);
+				if (candidate && isFresh(candidate)) {
+					state = candidate;
+					break;
+				}
+				if (candidate) sawStale = true;
 				await sleep(Math.max(200, Number(settings.pollMs) || 1000));
 			}
 			if (cancelled) return;
-			if (!token) {
-				ctx.logger?.warn?.("[token-broadcast] 等不到 token（%s 里没有），本次不推送", statePath);
+			if (!state) {
+				ctx.logger?.warn?.(
+					"[token-broadcast] 等不到本次运行的 token（%s%s），本次不推送",
+					statePath,
+					sawStale ? "；文件里只有上一次运行的旧 token" : " 里没有"
+				);
 				return;
 			}
-			ctx.logger?.info?.("[token-broadcast] 已取到 token（%d 字符）", token.length);
+			const token = state.token;
+			ctx.logger?.info?.("[token-broadcast] 已取到本次 token（%d 字符）", token.length);
 
-			// 2) 推负一屏卡片
+			// 2) 推负一屏卡片（地址一律写真实 IP，不留占位符）
 			if (!authCode) {
 				ctx.logger?.warn?.("[token-broadcast] 未配置 authCode，跳过负一屏推送");
 			} else {
+				const registerUrl = String(settings.registerUrl || "");
+				const gatewayHost =
+					String(settings.gatewayHost || "").trim() || gatewayHostFrom(registerUrl) || "<网关未配置>";
+				const lanIp = String(settings.lanIp || "").trim() || detectLanIp();
+				const lanPort = Number(settings.lanPort) > 0 ? Number(settings.lanPort) : 3081;
+				if (!lanIp) ctx.logger?.warn?.("[token-broadcast] 探测不到 LAN IP，卡片将省略局域网地址");
+
+				const gatewayLine = gatewayHost.startsWith("<")
+					? `- 网关：未配置（registerUrl / gatewayHost 都为空）`
+					: `- 网关：\`https://${gatewayHost}/?token=${token}\``;
+				const lanLine = lanIp
+					? `- 局域网：\`http://${lanIp}:${lanPort}/?token=${token}\``
+					: `- 局域网：本机当前无局域网 IPv4 地址`;
 				const nowSec = Math.floor(Date.now() / 1000);
 				const payload = {
 					data: {
@@ -157,7 +234,7 @@ export function apply(ctx, config) {
 								scheduleTaskName: "dsh 本次启动 token",
 								summary: "dsh 本次启动 token",
 								result: "已更新",
-								content: `# dsh 会话 token\n\n\`${token}\`\n\n用于 HTTPS 网关或局域网地址：\n\n- 网关：\`https://<服务器IP>:18443/?token=${token}\`\n- 局域网：\`http://<电脑IP>:3081/?token=${token}\`\n\n> 每次重启 dsh 都会更换，本卡片自动更新。`,
+								content: `# dsh 会话 token\n\n\`${token}\`\n\n用于 HTTPS 网关或局域网地址（均为实测地址）：\n\n${gatewayLine}\n${lanLine}\n\n- 本机局域网 IP：\`${lanIp || "未探测到"}\`（随网络变化，本卡片每次启动自动更新）\n\n> 每次重启 dsh 都会更换 token，本卡片自动更新。`,
 								source: "OpenClaw",
 								taskFinishTime: nowSec
 							}
@@ -168,7 +245,7 @@ export function apply(ctx, config) {
 				if (cancelled) return;
 				const matched = /"code"\s*:\s*"(0{10}|0)"/.test(result.body);
 				if (result.ok && matched) {
-					ctx.logger?.info?.("[token-broadcast] token 卡片已推送到负一屏");
+					ctx.logger?.info?.("[token-broadcast] token 卡片已推送到负一屏（网关 %s，局域网 %s:%s）", gatewayHost, lanIp || "-", lanPort);
 				} else {
 					ctx.logger?.warn?.("[token-broadcast] 推送失败（HTTP %s）：%s", result.status, result.body);
 				}

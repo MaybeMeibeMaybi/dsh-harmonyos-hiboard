@@ -134,6 +134,32 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-harmonyos-hiboard"
 
 **4) 重启 dsh**，然后让 agent 调用 `hiboard_push`（记得传 `schedule_id`）。
 
+**5) 装推送兜底（强烈建议）** —— 不装的话，一旦 agent 把推送写成正文（见下节），
+卡片会**静默消失**：
+
+```bash
+# 两个独立插件：push-guard（兜底）+ token-broadcast（启动推 token）
+git clone https://github.com/MaybeMeibeMaybi/dsh-harmonyos-hiboard.git E:/dsh-vendor/dsh-push-guard
+dsh plugin --profile web add "file:E:/dsh-vendor/dsh-push-guard/src/push-guard"
+```
+
+`~/.dsh/profiles/web/cordis.patch.yml`：
+
+```yaml
+- insert:
+    - id: push-guard
+      name: dsh-push-guard
+      config:
+        enabled: true
+        rescueEnabled: true          # L1：抢救"写成纯文本的调用"
+        promiseRescueEnabled: true   # L2：抢救"承诺了却没调用"
+        retryEnabled: true           # L3：失败按类别重试
+        authCode: <你的授权码>        # 与 hiboard-push 保持一致
+```
+
+> ⚠️ **同名 `insert` 条目只认第一个**。曾经 v1/v2 各写了一份，
+> 后写的配置被**静默忽略**（排查了十几分钟）。升级时记得替换而不是追加。
+
 完整步骤（含预检、排错、错误码）见 **[`docs/DEPLOY.md`](docs/DEPLOY.md)**。
 
 ---
@@ -144,6 +170,50 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-harmonyos-hiboard"
 |---|---|
 | `hiboard_push` | 推送一张任务卡片：`name`（标题）、`content`（Markdown，≤5000 字符）、`result`（状态标签）、`schedule_id`（**必传**）、`dry_run`（只校验不发送） |
 | `hiboard_verify` | 发送一张「连接测试」卡片，端到端验证授权码与网络 |
+| `hiboard_push_selfcheck` | 由 `dsh-push-guard` 提供：报告兜底插件是否生效、`hiboard_push` 是否已被接管重试、授权码是否配置、接口是否可达、最近一次推送状态 |
+
+---
+
+## ⚠️ 第四个坑（最坑的一个）：推送会**静默丢失**
+
+> 2026-09-27 实测事故：一晚连着 3 张卡片没到手机，而 dsh 界面**没有任何报错**。
+> 完整复盘见 **[`docs/INCIDENT-2026-09-27-silent-push-loss.md`](docs/INCIDENT-2026-09-27-silent-push-loss.md)**。
+
+工具不会自己调用 —— 而 **agent 可能"以为"自己调用了**。已实测到三种形态，全部是静默失败：
+
+| 形态 | 长什么样 | 为什么没报错 |
+|---|---|---|
+| **A. 把调用写成正文** | 正文里出现 `<hiboard_push><parameter name="content">…` 这段 XML | 只是普通文本，`turn/end` 依然 `completed` |
+| **B. 承诺了却没调用** | 正文写"我把结论推给你："，然后**什么调用都没有** | 同上，从会话记录看一切正常 |
+| **C. 标签带额外属性** | `<parameter name="content" string="true">` | 朴素正则匹配不到 `content` → 被当成"参数不全"，安静放弃 |
+
+### 修复：三级兜底插件 `src/push-guard/`
+
+| 级别 | 触发条件 | 行为 |
+|---|---|---|
+| **L1 rescue** | 正文出现字面量调用标记，且**该轮**从未真正调用 `hiboard_push` | 用同一解析器还原参数，按原样代为推送 |
+| **L2 promise** | 该轮未推送，但正文**明确承诺了推送**且正文够长 | 用该轮正文补推，`result` 标注"模型未调用推送工具" |
+| **L3 retry** | 工具真调用了但返回失败 | **按错误类别**重试：瞬时可重试，永久错误（如 `0000900034`）不重试 |
+
+关键实现细节（都是踩出来的）：
+
+- 判定"本轮推过没有"用**轮次号**而非消息序号，否则"上一轮推过"会吃掉本轮的兜底；
+- 解析 `<parameter>` 时正则必须允许**额外属性**（`[^>]*>`），否则形态 C 会漏；
+- L2 的意图识别**保守优先**：`要不要我把结果推给你？`／`我不会推送这张卡片。` 都不触发；
+- 插件的任何异常都内部吞掉并记日志 —— **绝不允许兜底逻辑把宿主 dsh 拖崩**。
+
+### 可观测性（"彻底修好"的关键）
+
+```
+<DSH_HOME>/lan/push-guard/
+├── startup.json      启动自检：authCode 是否配置、三级开关、pid
+├── last-state.json   最近一次兜底推送（哪一轮、哪一级、成功与否）
+└── audit.jsonl       流水：push-ok / push-failed / retry-ok / rescue-ok / no-push
+```
+
+装好之后，先让 agent 调一次 `hiboard_push_selfcheck` 确认三件事：
+**兜底插件生效了、`hiboard_push` 被接管了、授权码配对了**。
+在这之前，"保险丝到底有没有生效"只能靠猜 —— 本次事故里就真的猜错过一次。
 
 ---
 
@@ -186,12 +256,17 @@ dsh 会在**每个会话**里自动加载它。现成模板见
 │   ├── DEPLOY.md                              从零部署（含排错表）
 │   ├── CARD-CONTRACT.md                       负载契约 / 卡片形态 / 错误码
 │   ├── AGENTS-rule.md                         全局推送规则模板
+│   ├── INCIDENT-2026-09-27-silent-push-loss.md  ★ 推送静默丢失复盘（三级兜底的由来）
+│   ├── UPDATES-2026-09-27.md                   ★ 兜底插件 / 可观测性 / token 卡片修复
 │   └── UPDATES-2026-09-23.md                  演进汇总（含 token 推送插件）
 └── src/
     ├── lib/index.js                           插件源码（兼容性修复版）
     ├── lib/index.js.upstream-backup           上游原始版本，便于比对
     ├── package.json
     ├── cordis.patch.yml                       bundle 补丁（挂载插件用）
+    ├── push-guard/                            ★ 推送兜底插件（L1/L2/L3 + 自检 + 审计）
+    │   ├── lib/index.js
+    │   └── package.json
     └── token-broadcast/                       ★ 启动即推送 token 的插件
         ├── lib/index.js
         └── package.json
@@ -205,11 +280,26 @@ dsh 会在**每个会话**里自动加载它。现成模板见
 **dsh 的会话 token 只在启动时打印一次到 stdout、不落盘**，
 而手机上经常要用到它（例如给 HTTPS 网关授权会话），手工翻日志很麻烦。
 
-它做两件事：
+它做三件事：
 
-1. 等 dsh 启动器把 token 写进 `<用户目录>/.dsh/lan/web-state.json`
-2. 用它推一张只含 token 的负一屏卡片（**必须带非空 `scheduleTaskId`**，否则不渲染正文）
+1. 等 dsh 启动器把**本次运行**的 token 写进 `<用户目录>/.dsh/lan/web-state.json`
+2. 推一张 token 负一屏卡片（**必须带非空 `scheduleTaskId`**，否则不渲染正文），
+   卡片里的**网关地址与局域网地址都写真实 IP**（见下）
 3. 可选：把 token 用**注册密钥**上报给你自己的网关，让浏览器只输密码即可进入
+
+### 两个 2026-09-27 修掉的实际问题
+
+1. **地址曾经是占位符**：卡片正文里原本写的是
+   `https://<服务器IP>:18443/?token=…` 和 `http://<电脑IP>:3081/?token=…` ——
+   手机上根本没法用。现在：
+   - 网关主机从 `registerUrl` 推导（也可用 `gatewayHost` 显式指定）；
+   - 局域网 IP **每次启动动态探测**（`os.networkInterfaces()` 取第一个非内部 IPv4）。
+     实测：同一天内换网，局域网 IP 就从 `192.168.0.x` 段变成了 `192.168.3.x` 段 ——
+     **写死必然过期**。
+2. **会推送上次的失效 token**：`web-state.json` 在 dsh 退出时**不会被删除**，
+   上一轮的 token 一直躺在里面。原实现一读到就推，可能把**已失效的 token** 推给用户
+   （比不推更糟：用户拿着旧 token 反复试）。现在会校验文件里的 `pid` / `startedAt`
+   是否属于**本次运行**，只有确认新鲜才推。
 
 安装与配置：
 
@@ -228,9 +318,13 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-token-broadcast"
         authCode: <AUTH_CODE>
         scheduleId: dsh_token_notice
         # 可选：网关注册（见 dsh-aliyun-relay-access 项目）
-        registerUrl: 'https://<服务器IP>:18443/__gw_register'
-        registerKeyPath: 'E:\DSH\dsh-tunnel\secrets\gw-register-key.txt'
+        registerUrl: 'https://<GATEWAY-HOST>:18443/__gw_register'
+        registerKeyPath: '<你的密钥文件路径>'
         registerInsecure: true    # 网关用自签证书时；对负一屏仍保持严格校验
+        # 可选：留空则自动探测/推导，一般不需要填
+        # gatewayHost: '<GATEWAY-HOST>:18443'
+        # lanIp: '<LAN-IP>'
+        # lanPort: 3081
 ```
 
 ### 两个实测教训（写在了源码注释里）
