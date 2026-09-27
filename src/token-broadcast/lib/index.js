@@ -26,6 +26,7 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { request as httpsRequest } from "node:https";
+import { request as httpRequest } from "node:http";
 import z from "@deepseek-ai/schemastery";
 
 export const name = "token-broadcast";
@@ -128,7 +129,9 @@ function isFresh(state) {
 }
 
 /** POST JSON，返回 { ok, status, body }。不抛出，交给调用方判断。
- *  insecure 仅用于我们自己的网关（自签证书）；对华为负一屏一律保持严格校验。 */
+ *  insecure 仅用于我们自己的网关（自签证书）；对华为负一屏一律保持严格校验。
+ *  带 http 分支：一是与 dsh-push-guard 保持一致，二是**能对着本地桩做端到端自测**
+ *  （之前只支持 https，导致自测时桩收不到请求、误判成插件逻辑有问题）。 */
 function postJson(url, payload, insecure = false) {
 	return new Promise((resolve) => {
 		let target;
@@ -142,10 +145,12 @@ function postJson(url, payload, insecure = false) {
 		// x-trace-id 是 HIBoard 的必填请求头，缺了会返回 0000500001
 		// ("Parameter x-trace-id is empty")。格式与官方客户端一致。
 		const traceId = `task-push-${new Date().toISOString().replace(/[-T:.Z]/g, "").slice(0, 14)}`;
-		const req = httpsRequest(
+		const secure = target.protocol !== "http:";
+		const request = secure ? httpsRequest : httpRequest;
+		const req = request(
 			{
 				hostname: target.hostname,
-				port: target.port || 443,
+				port: target.port || (secure ? 443 : 80),
 				path: target.pathname + target.search,
 				method: "POST",
 				headers: {
@@ -210,15 +215,22 @@ export function apply(ctx, config) {
 			const token = state.token;
 			ctx.logger?.info?.("[token-broadcast] 已取到本次 token（%d 字符）", token.length);
 
+			// 这两个值**必须在最外层作用域算好**：
+			// 第 2 步（推卡片）和第 3 步（写注册状态）都要用它们。
+			// 2026-09-27 的 bug 就是把它们声明在了 `else {}` 块里，
+			// 导致第 3 步的 writeStatus 引用 gatewayHost 时抛 ReferenceError，
+			// 又被那个"安静吞掉"的 catch 吃掉 —— 结果 register-status.json 永远不生成，
+			// 排查了半天。教训：跨步骤共用的值放外层；catch 里别只写注释。
+			const registerUrl = String(settings.registerUrl || "");
+			const gatewayHost =
+				String(settings.gatewayHost || "").trim() || gatewayHostFrom(registerUrl) || "<网关未配置>";
+			const lanIp = String(settings.lanIp || "").trim() || detectLanIp();
+			const lanPort = Number(settings.lanPort) > 0 ? Number(settings.lanPort) : 3081;
+
 			// 2) 推负一屏卡片（地址一律写真实 IP，不留占位符）
 			if (!authCode) {
 				ctx.logger?.warn?.("[token-broadcast] 未配置 authCode，跳过负一屏推送");
 			} else {
-				const registerUrl = String(settings.registerUrl || "");
-				const gatewayHost =
-					String(settings.gatewayHost || "").trim() || gatewayHostFrom(registerUrl) || "<网关未配置>";
-				const lanIp = String(settings.lanIp || "").trim() || detectLanIp();
-				const lanPort = Number(settings.lanPort) > 0 ? Number(settings.lanPort) : 3081;
 				if (!lanIp) ctx.logger?.warn?.("[token-broadcast] 探测不到 LAN IP，卡片将省略局域网地址");
 
 				const gatewayLine = gatewayHost.startsWith("<")
@@ -266,7 +278,6 @@ export function apply(ctx, config) {
 			// 所以这里改成**有限重试 + 结果落盘**：失败不再静默，重试仍失败就写状态文件，
 			// 让"网关有没有拿到 token"随时可查（verify-gateway.mjs 可以直接读）。
 			const keyPath = String(settings.registerKeyPath || "");
-			const registerUrl = String(settings.registerUrl || "");
 			const writeStatus = (record) => {
 				try {
 					const dir = join(homedir(), ".dsh", "lan", "token-broadcast");
@@ -277,8 +288,10 @@ export function apply(ctx, config) {
 						gatewayHost,
 						...record
 					}, null, 2), "utf8");
-				} catch {
-					/* 状态写不进去不影响主流程 */
+				} catch (error) {
+					// 不要在这里只写一句"不影响主流程"就完事：上面那次 ReferenceError
+					// 就是这样被吞掉、查了半天的。失败必须留痕。
+					ctx.logger?.warn?.("[token-broadcast] 写 register-status.json 失败：%s", error?.message ?? String(error));
 				}
 			};
 			if (!keyPath || !registerUrl || !existsSync(keyPath)) {
