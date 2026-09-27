@@ -22,7 +22,7 @@
  * `Config` 必须是 schemastery schema（cordis 4 会调 Config["~standard"].validate）。
  */
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { homedir, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { request as httpsRequest } from "node:https";
@@ -62,6 +62,10 @@ export const Config = z.object({
 	lanIp: z.string().default(""),
 	/** 局域网入口端口（卡片里拼 http://<lanIp>:<port>/?token=...） */
 	lanPort: z.number().default(3081),
+	/** 网关注册失败时的重试次数（网关把 token 存在内存里，漏注册会导致远程端连不上）。 */
+	registerAttempts: z.number().default(3),
+	/** 网关注册重试间隔（毫秒）。 */
+	registerRetryMs: z.number().default(5000),
 	pushServiceUrl: z.string().default(DEFAULTS.pushServiceUrl)
 });
 
@@ -252,23 +256,67 @@ export function apply(ctx, config) {
 			}
 
 			// 3) 可选：把 token 注册给 HTTPS 网关（免手工粘贴）
+			//
+			// 这一步比"推卡片"更关键：网关把 token 存在**进程内存**里，
+			// 只要没收到注册，远程端登录时会一直显示"网关尚未收到本次启动的 token"，
+			// 用户手工粘贴 token 也可能因为拿的是上一轮的卡片而失败。
+			// 2026-09-27 就发生过：dsh 卡死后手工重启，卡片推到了、注册没成，
+			// 远程端彻底连不上，只能人工排查。
+			//
+			// 所以这里改成**有限重试 + 结果落盘**：失败不再静默，重试仍失败就写状态文件，
+			// 让"网关有没有拿到 token"随时可查（verify-gateway.mjs 可以直接读）。
 			const keyPath = String(settings.registerKeyPath || "");
 			const registerUrl = String(settings.registerUrl || "");
-			if (!keyPath || !registerUrl || !existsSync(keyPath)) return;
+			const writeStatus = (record) => {
+				try {
+					const dir = join(homedir(), ".dsh", "lan", "token-broadcast");
+					mkdirSync(dir, { recursive: true });
+					writeFileSync(join(dir, "register-status.json"), JSON.stringify({
+						at: new Date().toISOString(),
+						tokenTail: token.slice(-8),
+						gatewayHost,
+						...record
+					}, null, 2), "utf8");
+				} catch {
+					/* 状态写不进去不影响主流程 */
+				}
+			};
+			if (!keyPath || !registerUrl || !existsSync(keyPath)) {
+				ctx.logger?.warn?.("[token-broadcast] 未配置网关注册（registerUrl/registerKeyPath），远程端需要手工粘贴 token");
+				writeStatus({ ok: false, reason: "not-configured" });
+				return;
+			}
 			let key = "";
 			try {
 				key = readFileSync(keyPath, "utf8").trim();
-			} catch {
+			} catch (error) {
+				writeStatus({ ok: false, reason: "key-unreadable", detail: error?.message ?? String(error) });
 				return;
 			}
-			if (!key) return;
-			const result = await postJson(registerUrl, { token, key }, settings.registerInsecure === true);
-			if (cancelled) return;
-			if (result.ok) {
-				ctx.logger?.info?.("[token-broadcast] 已把 token 注册给网关（浏览器免粘贴）");
-			} else {
-				ctx.logger?.warn?.("[token-broadcast] 网关注册失败（HTTP %s）：%s", result.status, result.body);
+			if (!key) {
+				writeStatus({ ok: false, reason: "key-empty" });
+				return;
 			}
+			const maxAttempts = Math.max(1, Number(settings.registerAttempts) || 3);
+			let registered = false;
+			let last = { status: 0, body: "" };
+			for (let attempt = 1; attempt <= maxAttempts && !cancelled; attempt += 1) {
+				last = await postJson(registerUrl, { token, key }, settings.registerInsecure === true);
+				if (last.ok && /"ok"\s*:\s*true/.test(last.body)) {
+					registered = true;
+					ctx.logger?.info?.("[token-broadcast] 已把 token 注册给网关（第 %d 次尝试，浏览器免粘贴）", attempt);
+					break;
+				}
+				ctx.logger?.warn?.("[token-broadcast] 网关注册失败（第 %d/%d 次，HTTP %s）：%s",
+					attempt, maxAttempts, last.status, last.body);
+				if (attempt < maxAttempts) await sleep(Math.max(500, Number(settings.registerRetryMs) || 5000));
+			}
+			if (cancelled) return;
+			if (!registered) {
+				ctx.logger?.warn?.("[token-broadcast] ❌ 网关注册最终失败——远程端会显示“网关尚未收到本次启动的 token”；" +
+					"可执行 node E:\\DSH\\dsh-tunnel\\verify-gateway.mjs 复查并补注册");
+			}
+			writeStatus({ ok: registered, attempts: maxAttempts, status: last.status, body: last.body.slice(0, 200) });
 		})();
 
 		return () => {
