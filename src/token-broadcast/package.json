@@ -1,8 +1,8 @@
 {
   "name": "dsh-token-broadcast",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "Push the dsh session token to the phone's HarmonyOS assistant-today card whenever dsh starts, so it never has to be dug out of a log by hand.",
+  "description": "Push the dsh session token plus the three entry addresses (LAN / Aliyun / Tailscale) to the phone's HarmonyOS assistant-today card whenever dsh starts, so it never has to be dug out of a log by hand. 1.1.0 (2026-09-30): card wording fixed by the user, and since Tailscale starts alongside dsh, a second card is pushed once the tailnet link comes up.",
   "type": "module",
   "main": "lib/index.js",
   "exports": { ".": "./lib/index.js", "./package.json": "./package.json" },
