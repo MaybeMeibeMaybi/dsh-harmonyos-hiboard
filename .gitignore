@@ -9,6 +9,8 @@ pnpm-lock.yaml
 # ---- Logs and runtime state ----
 *.log
 logs/
+# 插件运行时产物（审计/状态/落盘），一律不进仓库
+*.jsonl
 
 # ---- Secrets: never commit credentials ----
 # The HiBoard auth code goes in ~/.dsh/profiles/web/cordis.patch.yml, NOT in this repo.
@@ -16,6 +18,8 @@ logs/
 .env.*
 *.pem
 *.key
+*.crt
+*.cer
 *dsh_aliyun*
 credential*
 

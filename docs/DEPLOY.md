@@ -107,6 +107,7 @@ hiboard_push
 | `Cannot find package 'dsh-hiboard-push'` | 插件没装进 profile | 重跑第 2 步 |
 | `ERR_PNPM_LINKED_PKG_DIR_NOT_FOUND` | 源码目录路径含空格 | 换到无空格路径（第 1 步） |
 | 推送返回 `0000900034` | 授权码无效/过期 | 重新取码，改 `cordis.patch.yml`，重启 |
+| 推送返回 `404 {"message":"Not Found"}`（`Server: elb`） | **华为侧 ELB 坏窗口**：请求没到业务服务，与授权码/正文无关 | 见 [`ENDPOINT-NOTES.md`](ENDPOINT-NOTES.md) 第 3 节：用错误 authCode 探一次即可判定。坏窗口会自行恢复；`push-guard` 已把 404 视为可重试（指数退避） |
 | 推送返回 `0000000000` 但卡片只有一行 | 没传 `schedule_id` | 传一个稳定的 schedule_id |
 | `0200100004` + 子码 `82600013` | 平台侧「服务动态推送」开关关闭 | 负一屏 → 我的 → 设置/动态管理 打开 |
 | 工具 `hiboard_push` 不存在 | 插件只在 `web` profile 注册 | 用 `dsh --profile web` |

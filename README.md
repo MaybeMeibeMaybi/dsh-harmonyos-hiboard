@@ -138,7 +138,7 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-harmonyos-hiboard"
 卡片会**静默消失**：
 
 ```bash
-# 两个独立插件：push-guard（兜底）+ token-broadcast（启动推 token）
+# 推送兜底插件：push-guard（L1 抢救 / L2 承诺兜底 / L3 重试）
 git clone https://github.com/MaybeMeibeMaybi/dsh-harmonyos-hiboard.git E:/dsh-vendor/dsh-push-guard
 dsh plugin --profile web add "file:E:/dsh-vendor/dsh-push-guard/src/push-guard"
 ```
@@ -209,7 +209,7 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-push-guard/src/push-guard"
 |---|---|---|
 | **L1 rescue** | 正文出现字面量调用标记，且**该轮**从未真正调用 `hiboard_push` | 用同一解析器还原参数，按原样代为推送 |
 | **L2 promise** | 该轮未推送，但正文**明确承诺了推送**且正文够长 | 用该轮正文补推，`result` 标注"模型未调用推送工具" |
-| **L3 retry** | 工具真调用了但返回失败 | **按错误类别**重试：瞬时可重试，永久错误（如 `0000900034`）不重试 |
+| **L3 retry** | 工具真调用了但返回失败 | **按错误类别**重试：瞬时可重试（含 **HTTP 404** —— 华为侧 ELB 坏窗口，见 [`docs/ENDPOINT-NOTES.md`](docs/ENDPOINT-NOTES.md)），永久错误（如 `0000900034`）不重试；退避为**指数**（基数 × 2ⁿ⁻¹，封顶 60s），以便跨过几十秒的坏窗口 |
 
 关键实现细节（都是踩出来的）：
 
@@ -245,9 +245,17 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-push-guard/src/push-guard"
 | 成功码 | `0000000000`（也接受 `"0"`） |
 | 授权码无效 | `0000900034` |
 | 方法限制 | **仅 POST**（GET 返回 405） |
+| 间歇性 404 | `404 {"message":"Not Found"}` + `Server: elb`（**没有** `x-nuwa-*` 头）= 华为侧 ELB 坏窗口，**不是**密钥/正文/长度问题；几十秒~十几分钟自行恢复 |
 
 字段细节、卡片形态对照、全部错误码（含 `0200100004` 的 CP 子码含义）见
-**[`docs/CARD-CONTRACT.md`](docs/CARD-CONTRACT.md)**。
+**[`docs/CARD-CONTRACT.md`](docs/CARD-CONTRACT.md)**；
+端点的实测证据、404 的判定方法与"坏窗口自检"见
+**[`docs/ENDPOINT-NOTES.md`](docs/ENDPOINT-NOTES.md)**。
+
+> **推送返回 404？** 先别改配置。按 [`docs/ENDPOINT-NOTES.md`](docs/ENDPOINT-NOTES.md) 第 3 节
+> "用错误 authCode 探一次"判断是不是坏窗口：返回业务码 `0000900034` 说明端点正常（问题在你这边），
+> 返回 ELB 的 404 说明你正处在坏窗口。坏窗口会自己恢复，重试即可 ——
+> `push-guard` 已把 HTTP 404 视为**可重试**（指数退避，见下）。
 
 ---
 
@@ -273,92 +281,18 @@ dsh 会在**每个会话**里自动加载它。现成模板见
 │   ├── CARD-CONTRACT.md                       负载契约 / 卡片形态 / 错误码
 │   ├── AGENTS-rule.md                         全局推送规则模板
 │   ├── INCIDENT-2026-09-27-silent-push-loss.md  ★ 推送静默丢失复盘（三级兜底的由来）
-│   ├── UPDATES-2026-09-27.md                   ★ 兜底插件 / 可观测性 / token 卡片修复
-│   └── UPDATES-2026-09-23.md                  演进汇总（含 token 推送插件）
+│   ├── ENDPOINT-NOTES.md                      ★ 端点实测：间歇性 404 的判定与坏窗口自检
+│   ├── UPDATES-2026-09-27.md                   ★ 兜底插件 / 可观测性 / schedule_id 双保险
+│   └── UPDATES-2026-09-23.md                  演进汇总（远程访问架构与实测结论）
 └── src/
     ├── lib/index.js                           插件源码（兼容性修复版）
     ├── lib/index.js.upstream-backup           上游原始版本，便于比对
     ├── package.json
     ├── cordis.patch.yml                       bundle 补丁（挂载插件用）
-    ├── push-guard/                            ★ 推送兜底插件（L1/L2/L3 + 自检 + 审计）
-    │   ├── lib/index.js
-    │   └── package.json
-    └── token-broadcast/                       ★ 启动即推送 token 的插件
+    └── push-guard/                            ★ 推送兜底插件（L1/L2/L3 + 自检 + 审计）
         ├── lib/index.js
         └── package.json
 ```
-
----
-
-## 进阶用法：dsh 每次启动自动推一张 token 卡片
-
-`src/token-broadcast/` 是一个独立插件，解决一个很实际的问题：
-**dsh 的会话 token 只在启动时打印一次到 stdout、不落盘**，
-而手机上经常要用到它（例如给 HTTPS 网关授权会话），手工翻日志很麻烦。
-
-它做三件事：
-
-1. 等 dsh 启动器把**本次运行**的 token 写进 `<用户目录>/.dsh/lan/web-state.json`
-2. 推一张 token 负一屏卡片（**必须带非空 `scheduleTaskId`**，否则不渲染正文），
-   卡片里的**网关地址与局域网地址都写真实 IP**（见下）
-3. 可选：把 token 用**注册密钥**上报给你自己的网关，让浏览器只输密码即可进入
-
-### 三个 2026-09-27 修掉的实际问题
-
-1. **地址曾经是占位符**：卡片正文里原本写的是
-   `https://<服务器IP>:18443/?token=…` 和 `http://<电脑IP>:3081/?token=…` ——
-   手机上根本没法用。现在：
-   - 网关主机从 `registerUrl` 推导（也可用 `gatewayHost` 显式指定）；
-   - 局域网 IP **每次启动动态探测**（`os.networkInterfaces()` 取第一个非内部 IPv4）。
-     实测：同一天内换网，局域网 IP 就从 `192.168.0.x` 段变成了 `192.168.3.x` 段 ——
-     **写死必然过期**。
-2. **会推送上次的失效 token**：`web-state.json` 在 dsh 退出时**不会被删除**，
-   上一轮的 token 一直躺在里面。原实现一读到就推，可能把**已失效的 token** 推给用户
-   （比不推更糟：用户拿着旧 token 反复试）。现在会校验文件里的 `pid` / `startedAt`
-   是否属于**本次运行**，只有确认新鲜才推。
-3. **网关注册只试一次、失败静默放弃**：网关把 token 存在**进程内存**里，
-   每次 dsh 重启都必须重新注册。dsh 刚重启时网关/隧道恰好在重连，
-   那唯一一次注册很容易撞在窗口期；一旦漏掉，远程端会一直提示
-   **"网关尚未收到本次启动的 token"**，用户手工粘贴 token 也无效
-   （因为手机上那张卡片可能是上一轮的）。这是真实发生过的故障。
-   现在：**失败自动重试 3 次（间隔 5s，可配 `registerAttempts` / `registerRetryMs`）**，
-   结果写入 `<DSH_HOME>/lan/token-broadcast/register-status.json`，
-   最终失败时日志明确写出"远程端会显示网关尚未收到 token"并给出复查入口 —— **不再静默**。
-
-安装与配置：
-
-```bash
-dsh plugin --profile web add "file:E:/dsh-vendor/dsh-token-broadcast"
-```
-
-`~/.dsh/profiles/web/cordis.patch.yml`：
-
-```yaml
-- insert:
-    - id: token-broadcast
-      name: dsh-token-broadcast
-      config:
-        enabled: true
-        authCode: <AUTH_CODE>
-        scheduleId: dsh_token_notice
-        # 可选：网关注册（见 dsh-aliyun-relay-access 项目）
-        registerUrl: 'https://<GATEWAY-HOST>:18443/__gw_register'
-        registerKeyPath: '<你的密钥文件路径>'
-        registerInsecure: true    # 网关用自签证书时；对负一屏仍保持严格校验
-        # 可选：留空则自动探测/推导，一般不需要填
-        # gatewayHost: '<GATEWAY-HOST>:18443'
-        # lanIp: '<LAN-IP>'
-        # lanPort: 3081
-```
-
-### 两个实测教训（写在了源码注释里）
-
-1. **schemastery 的 `.default()` 不会随 `{...Config}` 展开生效** ——
-   `Config` 是 schema 对象，展开只能拿到 schema 自身属性，拿不到默认值。
-   所以默认值写成独立常量 `DEFAULTS` 并在 `apply()` 里显式兜底，否则请求 URL 会是空。
-2. **HIBoard 接口要求 `x-trace-id` 请求头**，缺了返回
-   `{"code":"0000500001","desc":"Parameter x-trace-id is empty"}`。
-   格式与官方客户端一致：`task-push-<yyyyMMddHHmmss>`。
 
 ---
 

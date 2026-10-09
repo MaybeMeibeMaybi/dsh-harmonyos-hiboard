@@ -30,7 +30,9 @@
  *      → 用该轮最后一条实质正文代为推送，卡片名标注"自动补推"，避免张冠李戴。
  *   L3 retry  （retryEnabled）
  *      包一层 hiboard_push 的 execute：失败分类后重试（瞬时错误才重试，
- *      授权码无效/内容过长这类永久错误不重试），并把每次结果写进审计日志。
+ *      **含 HTTP 404** —— 该端点会被华为侧 ELB 间歇性回成 404，见 docs/ENDPOINT-NOTES.md；
+ *      授权码无效/内容过长这类永久错误不重试），指数退避（基数 × 2ⁿ⁻¹，封顶 60s），
+ *      并把每次结果写进审计日志。
  *   ★ schedule_id 硬约束（defaultScheduleId）
  *      同一层包装里，调用参数若缺 `schedule_id` 或为空串，**自动补成默认值**。
  *      这样"到达 HIBoard 的每一张卡片都是能点开的"，不依赖模型记得传参。
@@ -71,8 +73,8 @@ const DEFAULTS = {
 	authCode: "",
 	pushServiceUrl: "https://hiboard-claw-drcn.ai.dbankcloud.cn/distribution/message/cloud/claw/msg/upload",
 	maxContentLength: 5000,
-	retryDelayMs: 2000,
-	retryCount: 1,
+	retryDelayMs: 3000,
+	retryCount: 3,
 	defaultResult: "任务已完成",
 	defaultScheduleId: "dsh_worklog",
 	stateDir: "",
@@ -92,9 +94,9 @@ export const Config = z.object({
 	authCode: z.string().default(""),
 	pushServiceUrl: z.string().default(DEFAULTS.pushServiceUrl),
 	maxContentLength: z.number().default(DEFAULTS.maxContentLength),
-	/** 重试前等待毫秒数。 */
+	/** 重试退避基数（毫秒）：第 n 次失败后等 基数 × 2ⁿ⁻¹，封顶 60s。 */
 	retryDelayMs: z.number().default(DEFAULTS.retryDelayMs),
-	/** 失败后最多重试几次（瞬时错误才重试）。 */
+	/** 失败后最多重试几次（瞬时错误才重试，含 HTTP 404 坏窗口）。 */
 	retryCount: z.number().default(DEFAULTS.retryCount),
 	/** 兜底卡片的结果标签默认值。 */
 	defaultResult: z.string().default(DEFAULTS.defaultResult),
@@ -111,6 +113,9 @@ export const Config = z.object({
 	/** 审计日志大小上限（字节），超出后截断为最近一半。 */
 	auditMaxBytes: z.number().default(DEFAULTS.auditMaxBytes)
 });
+
+/** 退避上限：坏窗口量级是几十秒，给到 60s 够跨过去。 */
+const MAX_RETRY_DELAY_MS = 60000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -358,7 +363,12 @@ export function classifyPush(result) {
 		// 2xx 且没有任何失败信号（无 code、或 code 为空/全零样式）→ 认为平台已接受
 		if (!codeMatch) return { ok: true, retryable: false, code: "", message: "OK（响应中无 code 字段，按 2xx 视为已接受）" };
 	}
-	const permanent = PERMANENT_CODES.has(code) || (result.status >= 400 && result.status < 500);
+	// HTTP 404 是**可重试**的：该端点的正确路径会被华为侧 ELB 间歇性地回成 404
+	// （几十秒~十几分钟自行恢复，见 docs/ENDPOINT-NOTES.md）。把它当永久错误会让落在
+	// 坏窗口里的推送静默丢失；而它由 ELB 直出、业务侧根本没处理，重试不会造成重复卡片。
+	// 其余 4xx（如 405 用错方法）仍是永久错误。
+	const isTransient404 = result.status === 404;
+	const permanent = PERMANENT_CODES.has(code) || (result.status >= 400 && result.status < 500 && !isTransient404);
 	return { ok: false, retryable: !permanent, code, message: body };
 }
 
@@ -569,11 +579,15 @@ export function apply(ctx, config) {
 							let tries = 0;
 							while (!verdict.ok && verdict.retryable && tries < attempts) {
 								tries += 1;
+								// 指数退避（基数 × 2ⁿ⁻¹，封顶 60s）：坏窗口动辄几十秒，固定间隔的
+								// 少数几次尝试容易正好全错过（见 docs/ENDPOINT-NOTES.md）。
+								const base = Math.max(200, Number(settings.retryDelayMs) || DEFAULTS.retryDelayMs);
+								const delay = Math.min(base * 2 ** (tries - 1), MAX_RETRY_DELAY_MS);
 								ctx.logger?.warn?.(
 									"[push-guard] hiboard_push 失败（%s，可重试），%dms 后第 %d 次重试：%s",
-									verdict.code || "-", settings.retryDelayMs, tries, String(verdict.message).slice(0, 120)
+									verdict.code || "-", delay, tries, String(verdict.message).slice(0, 120)
 								);
-								await sleep(Math.max(200, Number(settings.retryDelayMs) || DEFAULTS.retryDelayMs));
+								await sleep(delay);
 								const next = await original(effectiveArgs, exec);
 								if (next && next.success) {
 									audit({ kind: "retry-ok", tries, taskName: next.taskName });
