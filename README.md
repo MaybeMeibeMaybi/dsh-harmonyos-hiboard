@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![HarmonyOS NEXT](https://img.shields.io/badge/HarmonyOS-NEXT-000000?logo=huawei&logoColor=white)](#)
-[![dsh](https://img.shields.io/badge/DeepSeek%20Harness-dsh%200.1.5-4B6BFB)](#)
+[![dsh](https://img.shields.io/badge/DeepSeek%20Harness-0.1.5%20%7C%200.2-4B6BFB)](#)
 [![Node](https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white)](#)
 
 把 **DeepSeek Harness（dsh）** 的对话与任务结果，以 **服务卡片** 形式推送到华为鸿蒙
@@ -12,6 +12,7 @@
 
 > 本仓库基于 [Entity-Him/dsh-hiboard-push](https://github.com/Entity-Him/dsh-hiboard-push)（MIT）修改，
 > 修复了它在 **dsh 0.1.5 / cordis 4** 上的启动崩溃，并补齐了部署文档与卡片契约分析。
+> 同时兼容 **dsh 0.2**（见下方「兼容性」与 [`docs/UPDATES-2026-10-12.md`](docs/UPDATES-2026-10-12.md)）。
 > 来源与改动逐条列于 [`NOTICE`](NOTICE)。
 
 ---
@@ -131,6 +132,13 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-harmonyos-hiboard"
 ```
 
 授权码获取：手机 **负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体**。
+
+> **装完/改过 `package.json` 后一定要重新注入**：profile 里的
+> `node_modules/dsh-hiboard-push` 是 pnpm **复制**进去的，不是链接。
+> 只改源目录会被旧副本盖住，表现为"改了没反应"。
+> `dsh plugin --profile web install` 之后用
+> `Select-String -Path "$env:USERPROFILE\.dsh\profiles\web\node_modules\dsh-hiboard-push\package.json" -Pattern "dsh-tools"`
+> 确认 peer 上界已是 `<0.3.0-0`。
 
 **4) 重启 dsh**，然后让 agent 调用 `hiboard_push`（记得传 `schedule_id`）。
 
@@ -282,6 +290,7 @@ dsh 会在**每个会话**里自动加载它。现成模板见
 │   ├── AGENTS-rule.md                         全局推送规则模板
 │   ├── INCIDENT-2026-09-27-silent-push-loss.md  ★ 推送静默丢失复盘（三级兜底的由来）
 │   ├── ENDPOINT-NOTES.md                      ★ 端点实测：间歇性 404 的判定与坏窗口自检
+│   ├── UPDATES-2026-10-12.md                   ★ dsh 0.2 兼容：放宽 peer 上界（不修会被拒载）
 │   ├── UPDATES-2026-10-11.md                   ★ 重复卡片修复 / 凭据出仓 / 重试预算拆分 / source 可配
 │   ├── UPDATES-2026-09-27.md                   ★ 兜底插件 / 可观测性 / schedule_id 双保险
 │   └── UPDATES-2026-09-23.md                  演进汇总（远程访问架构与实测结论）
@@ -301,10 +310,19 @@ dsh 会在**每个会话**里自动加载它。现成模板见
 
 | 组件 | 版本 |
 |---|---|
-| DeepSeek Harness (dsh) | 0.1.5（验证版本） |
+| DeepSeek Harness (dsh) | **0.1.5**（修复目标）／ **0.2**（兼容，已验证准入） |
 | cordis | 4.x |
 | Node.js | 18+ |
 | HarmonyOS | **7.0.0.107**（实测；仅手机端） |
+
+> **dsh 0.2 注意**：0.2 起会对插件的 `peerDependencies` 做准入检查，
+> 不匹配则**整个 bundle 被跳过**（工具随之消失）。
+> 本仓库自 **`dsh-hiboard-push` 0.2.0 / 仓库 0.5.0** 起已放宽 peer 上界到 `<0.3.0-0`。
+> 若你用的是更早的副本，请升级或自行放宽，否则在 dsh 0.2 上会被拒载 ——
+> 详见 [`docs/UPDATES-2026-10-12.md`](docs/UPDATES-2026-10-12.md)。
+>
+> 另注意：放宽 peer 后必须**重新注入**（`dsh plugin --profile web install`），
+> 因为 profile 的 `node_modules/<pkg>` 是 pnpm 的**注入副本**，不是符号链接。
 
 **平台侧**：华为负一屏「智慧助手·今天」的 HIBoard 云侧接口。
 网络契约与官方 `today-task` skill、以及独立 Rust 实现

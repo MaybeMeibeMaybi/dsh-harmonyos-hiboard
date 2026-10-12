@@ -1,7 +1,7 @@
 {
   "name": "dsh-harmonyos-hiboard",
-  "version": "0.4.0",
-  "description": "Push DeepSeek Harness (dsh) task results to Huawei HarmonyOS assistant-today service cards. Fixed for dsh 0.1.5 / cordis 4, with documentation of the card rendering contract.",
+  "version": "0.5.0",
+  "description": "Push DeepSeek Harness (dsh) task results to Huawei HarmonyOS assistant-today service cards. Fixed for dsh 0.1.5 / cordis 4 and compatible with dsh 0.2 (peer-range gate), with documentation of the card rendering contract.",
   "author": "Jim Chen",
   "license": "MIT",
   "repository": {
@@ -46,7 +46,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": ">=4.0.0-rc.1 <5.0.0-0",
-    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.2.0-0",
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1 <0.1.0 || >=0.1.0-rc.1 <0.3.0-0",
     "@deepseek-ai/schemastery": ">=3.0.0-rc.1 <4.0.0-0"
   }
 }
