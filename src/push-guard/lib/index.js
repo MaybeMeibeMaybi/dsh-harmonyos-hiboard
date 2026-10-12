@@ -33,6 +33,12 @@
  *      **含 HTTP 404** —— 该端点会被华为侧 ELB 间歇性回成 404，见 docs/ENDPOINT-NOTES.md；
  *      授权码无效/内容过长这类永久错误不重试），指数退避（基数 × 2ⁿ⁻¹，封顶 60s），
  *      并把每次结果写进审计日志。
+ *      重试预算按"能否确定没送达"分两档（`retryCount` / `ambiguousRetryCount`）：
+ *      ELB 直出的 404 能确定业务侧没处理，敢多试几次；超时/无响应/5xx 可能其实已经
+ *      送达，而每次重试都是**新的 msgId**（平台不去重）→ 只试很少几次，避免重复卡片。
+ *   ★ 卡片来源（source）
+ *      负一屏上显示的"来源 / AI 工具名"由负载的 `source` 字段决定，默认 `"OpenClaw"`
+ *      （官方 skill 与历史行为一致），可用 `source` 配置项改成任意品牌名。
  *   ★ schedule_id 硬约束（defaultScheduleId）
  *      同一层包装里，调用参数若缺 `schedule_id` 或为空串，**自动补成默认值**。
  *      这样"到达 HIBoard 的每一张卡片都是能点开的"，不依赖模型记得传参。
@@ -75,7 +81,9 @@ const DEFAULTS = {
 	maxContentLength: 5000,
 	retryDelayMs: 3000,
 	retryCount: 3,
+	ambiguousRetryCount: 1,
 	defaultResult: "任务已完成",
+	source: "OpenClaw",
 	defaultScheduleId: "dsh_worklog",
 	stateDir: "",
 	minPromiseLength: 120,
@@ -96,10 +104,30 @@ export const Config = z.object({
 	maxContentLength: z.number().default(DEFAULTS.maxContentLength),
 	/** 重试退避基数（毫秒）：第 n 次失败后等 基数 × 2ⁿ⁻¹，封顶 60s。 */
 	retryDelayMs: z.number().default(DEFAULTS.retryDelayMs),
-	/** 失败后最多重试几次（瞬时错误才重试，含 HTTP 404 坏窗口）。 */
+	/**
+	 * **确定没送达**的失败（目前只有 ELB 直出的 HTTP 404）最多重试几次。
+	 * 这类失败可放心重试：请求没进业务服务，重试不会产生重复卡片。
+	 */
 	retryCount: z.number().default(DEFAULTS.retryCount),
+	/**
+	 * **可能已经送达**的失败（超时 / 无响应 / 5xx / 业务侧未知失败码）最多重试几次。
+	 *
+	 * 为什么和 `retryCount` 分开：这类失败**无法确定平台到底收没收到**，而每次重试都会
+	 * 重新构造负载、生成**新的 `msgId`**（平台侧不去重）—— 也就是说，如果首次其实已经
+	 * 送达、只是响应丢了，重试就会在用户手机上凭空多出一张重复卡片。
+	 * 所以这里刻意压到 1，而把"敢重试"的额度让给确定未送达的 404。
+	 * 想更保守可设 0（这类失败一次都不重试）。
+	 */
+	ambiguousRetryCount: z.number().default(DEFAULTS.ambiguousRetryCount),
 	/** 兜底卡片的结果标签默认值。 */
 	defaultResult: z.string().default(DEFAULTS.defaultResult),
+	/**
+	 * 卡片 `source` 字段 —— 就是负一屏上那个**来源 / AI 工具名**的品牌化渲染值。
+	 * 默认 `"OpenClaw"`：与官方 `today-task` skill、`hwpush` 以及本插件历史行为一致。
+	 * 实测平台**接受**任意值（自定义值同样返回 `0000000000`），但渲染样式由平台决定，
+	 * 换值后请先在真机上看一眼卡片再长期使用。
+	 */
+	source: z.string().default(DEFAULTS.source),
 	/**
 	 * `hiboard_push` 没带有效 schedule_id 时自动补的值。
 	 * 为什么需要：scheduleTaskId 为空 → 负一屏只显示一行标题、正文不渲染、详情页点不开。
@@ -316,7 +344,7 @@ function postJson(url, payload) {
 	});
 }
 
-function buildPayload({ authCode, name, content, result, scheduleId }) {
+function buildPayload({ authCode, name, content, result, scheduleId, source }) {
 	const nowSec = Math.floor(Date.now() / 1000);
 	return {
 		data: {
@@ -329,7 +357,7 @@ function buildPayload({ authCode, name, content, result, scheduleId }) {
 					summary: name,
 					result,
 					content,
-					source: "OpenClaw",
+					source: String(source ?? "").trim() || DEFAULTS.source,
 					taskFinishTime: nowSec
 				}
 			]
@@ -345,23 +373,51 @@ const PERMANENT_CODES = new Set(["0000900034"]);
  * 判断一次推送结果：成功 / 可重试 / 永久失败。
  *
  * 这里刻意区分三种"看起来不一样但其实是同一件事"的返回：
- *   1. 工具返回值（`{success:false, code, message}`）—— 优先按 `success` 判；
- *   2. HIBoard 原始响应（`{"code":"0000000000"}`）；
+ *   1. 工具返回值（`{success, code, message[, status]}`）—— 按 `success` 判；
+ *   2. HIBoard 原始响应（`{ok, status, body}`，`{"code":"0000000000"}`）；
  *   3. **既没 success:false、也没有任何 code 的 2xx 响应** —— 视为成功。
  * 为什么要管第 3 种：万一平台将来不回 `code` 字段了，
  * 把它误判成"失败"会导致**卡片已经推成功、却再推一遍**，平白多一张重复卡片。
  * 宁可少重试，也不要制造重复卡片。
+ *
+ * ⚠️ 2026-10-11 修掉一个真实故障：旧实现只认 `result.ok`，而
+ * `hiboard_push` 的 execute 返回的是 `{success, code, message, ...}` —— **没有 `ok` 字段**。
+ * 于是每一次**成功**的推送都跳过 `if (result.ok)` 分支、掉到最后一行被判成"可重试失败"，
+ * L3 包装器于是每次推送都重试一遍 = 用户手机上**每张卡片都出现两次**。
+ * 证据：`~/.dsh/lan/push-guard/audit.jsonl` 里 27 条 `retry-ok`、**0 条 `push-ok`**
+ * （若首推成功就会记 push-ok）。所以现在先把"工具返回值"这个形状单独认出来。
  */
 export function classifyPush(result) {
-	if (!result) return { ok: false, retryable: true, code: "", message: "无响应" };
+	if (!result) return { ok: false, retryable: true, ambiguous: true, code: "", message: "无响应" };
+
+	// ---- 形状 A：hiboard_push 工具的返回值（没有 ok / body，只有 success / code / message）----
+	if (result.ok === undefined && typeof result.success === "boolean") {
+		const toolCode = typeof result.code === "string" ? result.code : "";
+		if (result.success) {
+			return { ok: true, retryable: false, ambiguous: false, code: toolCode, message: String(result.message ?? "OK") };
+		}
+		const status = Number(result.status);
+		// 工具把 HTTP 状态码透传上来了（见 dsh-hiboard-push 的 sendPush）：404 是 ELB 坏窗口，
+		// 确定没送达 → 敢多试；其余 4xx（如 405）是永久错误。
+		const is404 = status === 404;
+		const permanent = PERMANENT_CODES.has(toolCode) || (status >= 400 && status < 500 && !is404);
+		const retryable = !permanent;
+		return { ok: false, retryable, ambiguous: retryable && !is404, code: toolCode, message: String(result.message ?? "") };
+	}
+
+	// ---- 形状 B：HIBoard 的原始响应（push-guard 自己做兜底推送时看到的就是这个）----
 	const body = result.body ?? "";
 	const codeMatch = /"code"\s*:\s*"([^"]+)"/.exec(body);
 	const code = codeMatch ? codeMatch[1] : "";
 	if (result.ok) {
-		if (SUCCESS_RE.test(body)) return { ok: true, retryable: false, code: "", message: "OK" };
-		if (result.success === false) return { ok: false, retryable: !PERMANENT_CODES.has(code), code, message: body };
+		if (SUCCESS_RE.test(body)) return { ok: true, retryable: false, ambiguous: false, code: "", message: "OK" };
+		if (result.success === false) {
+			const retryable = !PERMANENT_CODES.has(code);
+			// 业务侧已经回过话了（只是说失败）→ 到底有没有落库不确定，算"可能已送达"
+			return { ok: false, retryable, ambiguous: retryable, code, message: body };
+		}
 		// 2xx 且没有任何失败信号（无 code、或 code 为空/全零样式）→ 认为平台已接受
-		if (!codeMatch) return { ok: true, retryable: false, code: "", message: "OK（响应中无 code 字段，按 2xx 视为已接受）" };
+		if (!codeMatch) return { ok: true, retryable: false, ambiguous: false, code: "", message: "OK（响应中无 code 字段，按 2xx 视为已接受）" };
 	}
 	// HTTP 404 是**可重试**的：该端点的正确路径会被华为侧 ELB 间歇性地回成 404
 	// （几十秒~十几分钟自行恢复，见 docs/ENDPOINT-NOTES.md）。把它当永久错误会让落在
@@ -369,7 +425,10 @@ export function classifyPush(result) {
 	// 其余 4xx（如 405 用错方法）仍是永久错误。
 	const isTransient404 = result.status === 404;
 	const permanent = PERMANENT_CODES.has(code) || (result.status >= 400 && result.status < 500 && !isTransient404);
-	return { ok: false, retryable: !permanent, code, message: body };
+	const retryable = !permanent;
+	// ambiguous 决定用哪份重试预算（见 Config.ambiguousRetryCount）：只有"ELB 直出的 404"
+	// 能**确定**请求没进业务服务；超时 / 无响应 / 5xx 都可能其实已经落库。
+	return { ok: false, retryable, ambiguous: retryable && !isTransient404, code, message: body };
 }
 
 // ---------------------------------------------------------------- 审计 / 状态
@@ -413,6 +472,9 @@ export function apply(ctx, config) {
 	const resolveAuthCode = () => String(settings.authCode || process.env.DSH_HIBOARD_AUTH_CODE || "").trim();
 	const pushUrl = String(settings.pushServiceUrl || DEFAULTS.pushServiceUrl);
 	const maxLen = Number(settings.maxContentLength) > 0 ? Number(settings.maxContentLength) : DEFAULTS.maxContentLength;
+	const cardSource = String(settings.source ?? "").trim() || DEFAULTS.source;
+	const retryBudget = Math.max(0, Number(settings.retryCount) >= 0 ? Number(settings.retryCount) : DEFAULTS.retryCount);
+	const ambiguousBudget = Math.max(0, Number(settings.ambiguousRetryCount) >= 0 ? Number(settings.ambiguousRetryCount) : DEFAULTS.ambiguousRetryCount);
 	const stateDir = String(settings.stateDir || "").trim() || join(homedir(), ".dsh", "lan", "push-guard");
 	const auditMax = Number(settings.auditMaxBytes) > 0 ? Number(settings.auditMaxBytes) : DEFAULTS.auditMaxBytes;
 
@@ -434,14 +496,17 @@ export function apply(ctx, config) {
 		rescueEnabled: settings.rescueEnabled !== false,
 		promiseRescueEnabled: settings.promiseRescueEnabled !== false,
 		retryEnabled: settings.retryEnabled !== false,
+		retryCount: retryBudget,
+		ambiguousRetryCount: ambiguousBudget,
+		source: cardSource,
 		defaultScheduleId: String(settings.defaultScheduleId || DEFAULTS.defaultScheduleId),
 		stateDir
 	};
 	safeWrite(stateDir, "startup.json", JSON.stringify(startup, null, 2));
 	ctx.logger?.info?.(
-		"[push-guard] 启动自检：authCode=%s；L1 抢救=%s，L2 承诺兜底=%s，L3 重试=%s；schedule_id 兜底=%s；状态目录=%s",
+		"[push-guard] 启动自检：authCode=%s；L1 抢救=%s，L2 承诺兜底=%s，L3 重试=%s（确定未送达 %d 次 / 可能已送达 %d 次）；卡片来源=%s；schedule_id 兜底=%s；状态目录=%s",
 		startup.authCode, startup.rescueEnabled, startup.promiseRescueEnabled, startup.retryEnabled,
-		startup.defaultScheduleId, stateDir
+		retryBudget, ambiguousBudget, cardSource, startup.defaultScheduleId, stateDir
 	);
 	if (startup.authCode === "MISSING") {
 		ctx.logger?.warn?.("[push-guard] ⚠️ 未配置 authCode，任何兜底推送都会失败（请检查 hiboard-push / push-guard 配置）");
@@ -514,6 +579,8 @@ export function apply(ctx, config) {
 						defaultResult: settings.defaultResult || DEFAULTS.defaultResult,
 						// 兜底卡片同样必须是"能点开"的：schedule_id 为空时用默认分组
 						defaultScheduleId: String(settings.defaultScheduleId || DEFAULTS.defaultScheduleId),
+						// 兜底卡片与正常卡片用同一个来源名（负一屏上显示的 AI 工具名）
+						source: cardSource,
 						stateDir,
 						audit
 					});
@@ -550,7 +617,8 @@ export function apply(ctx, config) {
 						return;
 					}
 					const original = tool.execute;
-					const attempts = Math.max(0, Number(settings.retryCount) >= 0 ? Number(settings.retryCount) : DEFAULTS.retryCount);
+					const attempts = retryBudget;
+					const ambiguousAttempts = ambiguousBudget;
 					const fallbackScheduleId = String(settings.defaultScheduleId || DEFAULTS.defaultScheduleId).trim() || DEFAULTS.defaultScheduleId;
 					const wrapped = async (args, exec) => {
 						// ---- 先补 schedule_id，再让工具校验/发送 ----
@@ -577,15 +645,22 @@ export function apply(ctx, config) {
 						try {
 							let verdict = classifyPush(outcome);
 							let tries = 0;
-							while (!verdict.ok && verdict.retryable && tries < attempts) {
+							for (;;) {
+								if (verdict.ok || !verdict.retryable) break;
+								// 用哪份预算取决于失败类别：确定未送达（ELB 直出的 404）敢多试几次；
+								// 可能已送达（超时/无响应/5xx/业务侧未知失败码）只试很少几次 ——
+								// 每次重试都会生成新 msgId，平台不去重，多试就可能多出一张重复卡片。
+								const budget = verdict.ambiguous ? ambiguousAttempts : attempts;
+								if (tries >= budget) break;
 								tries += 1;
+								const kind = verdict.ambiguous ? "可能已送达" : "确定未送达";
 								// 指数退避（基数 × 2ⁿ⁻¹，封顶 60s）：坏窗口动辄几十秒，固定间隔的
 								// 少数几次尝试容易正好全错过（见 docs/ENDPOINT-NOTES.md）。
 								const base = Math.max(200, Number(settings.retryDelayMs) || DEFAULTS.retryDelayMs);
 								const delay = Math.min(base * 2 ** (tries - 1), MAX_RETRY_DELAY_MS);
 								ctx.logger?.warn?.(
-									"[push-guard] hiboard_push 失败（%s，可重试），%dms 后第 %d 次重试：%s",
-									verdict.code || "-", delay, tries, String(verdict.message).slice(0, 120)
+									"[push-guard] hiboard_push 失败（%s，可重试·%s），%dms 后第 %d/%d 次重试：%s",
+									verdict.code || "-", kind, delay, tries, budget, String(verdict.message).slice(0, 120)
 								);
 								await sleep(delay);
 								const next = await original(effectiveArgs, exec);
@@ -610,8 +685,8 @@ export function apply(ctx, config) {
 					};
 					wrapped.__pushGuard = true;
 					tool.execute = wrapped;
-					ctx.logger?.info?.("[push-guard] 已接管 hiboard_push：失败分类 + 最多重试 %d 次 + schedule_id 缺失自动补 %s", attempts, fallbackScheduleId);
-					audit({ kind: "hook-installed", retryCount: attempts, defaultScheduleId: fallbackScheduleId });
+					ctx.logger?.info?.("[push-guard] 已接管 hiboard_push：失败分类 + 重试（确定未送达 %d 次 / 可能已送达 %d 次）+ schedule_id 缺失自动补 %s", attempts, ambiguousAttempts, fallbackScheduleId);
+					audit({ kind: "hook-installed", retryCount: attempts, ambiguousRetryCount: ambiguousAttempts, defaultScheduleId: fallbackScheduleId });
 				} catch (error) {
 					ctx.logger?.warn?.("[push-guard] 包装 hiboard_push 失败（已忽略）：%s", error?.message ?? String(error));
 				}
@@ -642,6 +717,8 @@ export function apply(ctx, config) {
 							guardActive: { type: "boolean", required: true },
 							hooked: { type: "boolean", required: true },
 							authCode: { type: "string", required: true },
+							source: { type: "string", required: true },
+							retryBudget: { type: "string", required: true },
 							endpoint: { type: "string", required: true },
 							endpointReachable: { type: "boolean", required: true },
 							lastState: { type: "string", required: true },
@@ -655,6 +732,8 @@ export function apply(ctx, config) {
 								`push-guard 生效: ${value.guardActive ? "✅" : "❌"}`,
 								`hiboard_push 已被接管（失败重试）: ${value.hooked ? "✅" : "❌（该轮可能未挂载成功）"}`,
 								`authCode: ${value.authCode}`,
+								`卡片来源（source）: ${value.source}`,
+								`重试预算: ${value.retryBudget}`,
 								`接口可达: ${value.endpointReachable ? "✅" : "❌"}  (${value.endpoint})`,
 								`最后状态: ${value.lastState}`,
 								`审计尾部: ${value.auditTail}`
@@ -689,6 +768,8 @@ export function apply(ctx, config) {
 						guardActive: true,
 						hooked,
 						authCode: resolveAuthCode() ? "已配置" : "未配置（推送会失败）",
+						source: cardSource,
+						retryBudget: `确定未送达 ${retryBudget} 次 / 可能已送达 ${ambiguousBudget} 次`,
 						endpoint: pushUrl,
 						endpointReachable: reachable,
 						lastState,
@@ -787,7 +868,7 @@ function looksLikePushTurn(text) {
 }
 
 /** 真正把兜底卡片推出去，并落审计 + 最后一轮状态。全部错误内部消化。 */
-async function deliver(ctx, { sessionId, turn, card, authCode, pushUrl, maxLen, defaultResult, defaultScheduleId, stateDir, audit }) {
+async function deliver(ctx, { sessionId, turn, card, authCode, pushUrl, maxLen, defaultResult, defaultScheduleId, source, stateDir, audit }) {
 	const stamp = () => new Date().toISOString();
 	try {
 		if (!authCode) {
@@ -804,7 +885,8 @@ async function deliver(ctx, { sessionId, turn, card, authCode, pushUrl, maxLen, 
 			name: card.name,
 			content,
 			result: card.result || defaultResult || DEFAULTS.defaultResult,
-			scheduleId: finalScheduleId
+			scheduleId: finalScheduleId,
+			source
 		});
 		const raw = await postJson(pushUrl, payload);
 		const verdict = classifyPush(raw);

@@ -8,6 +8,13 @@
 #   powershell -File .\publish.ps1 -DryRun     # preview: init + stage + commit only
 #   powershell -File .\publish.ps1             # real: also add remote and push
 #
+# The pre-publish credential scan reads the real secret values from a local,
+# git-ignored JSON file (default .\privacy-secrets.local.json). No secret is
+# stored in this script - a credential written here would be published with the
+# repository, and splitting it into fragments does not help (the fragments
+# concatenate straight back to the secret, and an exact-match scan cannot see
+# them either).
+#
 # ASCII-only on purpose (PowerShell 5.1 reads .ps1 as ANSI without a BOM).
 # ============================================================================
 [CmdletBinding()]
@@ -15,12 +22,20 @@ param(
     [string]$GitHubUser = 'MaybeMeibeMaybi',
     [string]$RepoName = 'dsh-harmonyos-hiboard',
     [string]$CommitMessage = 'feat: HarmonyOS assistant-today card push for DeepSeek Harness (dsh 0.1.5 / cordis 4 compatible)',
+    # Local file holding the real credential values to grep for. Keep it out of
+    # git (the repository .gitignore covers it); an out-of-repo path works too.
+    # Left empty by default: resolved below, because $PSScriptRoot is NOT
+    # populated yet while param() defaults are evaluated (PowerShell 5.1).
+    [string]$SecretsPath = '',
+    # Publish without running the credential scan. Use only if you know why.
+    [switch]$SkipSecretScan,
     [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Continue'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $here
+if (-not $SecretsPath) { $SecretsPath = Join-Path $here 'privacy-secrets.local.json' }
 
 function Head($t) { Write-Host "`n=== $t ===" -ForegroundColor Cyan }
 function OK($t)   { Write-Host "  [OK]   $t" -ForegroundColor Green }
@@ -40,27 +55,63 @@ if (-not (Test-Path "$here\README.md")) { Err2 "README.md missing - wrong direct
 if (-not (Test-Path "$here\LICENSE"))  { Err2 "LICENSE missing"; exit 1 }
 if (-not (Test-Path "$here\NOTICE"))   { Err2 "NOTICE missing"; exit 1 }
 
-# Guard: the real auth code must never be committed.
-# The needles are assembled at run time from fragments, so this script does not
-# itself contain the literal credentials it is searching for.
+# Guard: the real credentials must never be committed / published.
+#
+# Which keys of the secrets file count as credentials. Attribution values
+# (userName / email / sshAlias) are deliberately excluded: they appear in
+# LICENSE / NOTICE / docs by design and would otherwise block every publish.
+$CredentialKeys = @('authCode', 'gatewayPassword', 'registerKey', 'tokens', 'publicIps', 'tailnetIp', 'lanIp', 'hostname')
+
 Head "1. Secret scan (must be clean)"
-$needles = @(
-    ('eh5Q6' + 'HVUFCDU'),
-    ('2f655bdf' + 'c62e92ade')
-)
-$hits = @()
-Get-ChildItem $here -Recurse -File -Force |
-    Where-Object { $_.FullName -notmatch '\\\.git\\' } |
-    ForEach-Object {
-        $t = [IO.File]::ReadAllText($_.FullName, [Text.Encoding]::UTF8)
-        foreach ($n in $needles) { if ($t -match [regex]::Escape($n)) { $hits += "$($_.Name): $n" } }
+if ($SkipSecretScan) {
+    Warn "credential scan SKIPPED (-SkipSecretScan)"
+} else {
+    if (-not (Test-Path -LiteralPath $SecretsPath)) {
+        Err2 "secrets file not found: $SecretsPath"
+        Write-Host "      Create it (never commit it), pass -SecretsPath, or use -SkipSecretScan." -ForegroundColor Gray
+        Write-Host "      Example content: { `"authCode`": `"<your auth code>`" }" -ForegroundColor Gray
+        exit 1
     }
-if ($hits.Count -gt 0) {
-    Err2 "real credentials found - aborting:"
-    $hits | ForEach-Object { Write-Host "      $_" }
-    exit 1
+    $secrets = $null
+    try { $secrets = Get-Content -LiteralPath $SecretsPath -Raw -Encoding UTF8 | ConvertFrom-Json }
+    catch { Err2 "secrets file is not valid JSON: $SecretsPath"; exit 1 }
+
+    $needles = @()
+    foreach ($prop in $secrets.PSObject.Properties) {
+        if ($CredentialKeys -notcontains $prop.Name) { continue }
+        $values = @()
+        if ($prop.Value -is [string]) { $values = @($prop.Value) }
+        elseif ($prop.Value -is [System.Array]) { $values = @($prop.Value) }
+        foreach ($v in $values) {
+            $s = ([string]$v).Trim()
+            if ($s.Length -ge 8) { $needles += , @($prop.Name, $s) }
+        }
+    }
+    if ($needles.Count -eq 0) {
+        Err2 "no usable credential values in $SecretsPath (expected keys: $($CredentialKeys -join ', '))"
+        exit 1
+    }
+
+    $secretsFull = [IO.Path]::GetFullPath($SecretsPath)
+    $hits = @()
+    Get-ChildItem $here -Recurse -File -Force |
+        Where-Object { $_.FullName -notmatch '\\\.git\\' -and $_.FullName -ne $secretsFull } |
+        ForEach-Object {
+            $rel = $_.FullName.Substring($here.Length).TrimStart('\')
+            $lines = [IO.File]::ReadAllLines($_.FullName, [Text.Encoding]::UTF8)
+            for ($i = 0; $i -lt $lines.Length; $i++) {
+                foreach ($n in $needles) {
+                    if ($lines[$i].Contains($n[1])) { $hits += ('{0}:{1}  [{2}]' -f $rel, ($i + 1), $n[0]) }
+                }
+            }
+        }
+    if ($hits.Count -gt 0) {
+        Err2 "real credentials found - aborting (matched values are NOT printed):"
+        $hits | ForEach-Object { Write-Host "      $_" }
+        exit 1
+    }
+    OK "no real credentials in any file ($($needles.Count) credential value(s) checked)"
 }
-OK "no real credentials in any file"
 
 Head "2. git init"
 if (Test-Path "$here\.git") {
@@ -68,6 +119,22 @@ if (Test-Path "$here\.git") {
 } else {
     & git init -b main 2>&1 | Out-Null
     if (Test-Path "$here\.git") { OK "initialised on branch main" } else { Err2 "git init failed"; exit 1 }
+}
+
+Head "2b. Secrets file must not be committable"
+if (-not (Test-Path -LiteralPath $SecretsPath)) {
+    Warn "no secrets file at $SecretsPath - nothing to protect"
+} elseif (-not ([IO.Path]::GetFullPath($SecretsPath)).StartsWith($here + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    OK "secrets file lives outside the repository"
+} else {
+    & git check-ignore -q -- $SecretsPath 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        OK "secrets file is git-ignored: $SecretsPath"
+    } else {
+        Err2 "secrets file is inside the repo but NOT git-ignored: $SecretsPath"
+        Write-Host "      Add it to .gitignore before publishing." -ForegroundColor Gray
+        exit 1
+    }
 }
 
 Head "3. Stage and commit"

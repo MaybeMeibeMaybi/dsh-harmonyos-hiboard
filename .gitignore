@@ -43,6 +43,9 @@ secrets/
 *.p12
 ca-key.pem
 gateway.env
+# 发布前扫描用的针脚文件（publish.ps1 读它做凭据比对）：只存在本机，永不入库
+privacy-secrets.local.json
+*secrets*.local.json
 # CA certs for phone install are safe to publish, but keep local copies out:
 !ca-for-phone/*.cer
 !ca-for-phone/*.crt

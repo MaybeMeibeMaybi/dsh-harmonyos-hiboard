@@ -48,7 +48,7 @@
 | `summary` | 摘要（与标题一致即可） |
 | `result` | 状态标签文字，默认「任务已完成」 |
 | `content` | Markdown 正文，**上限 5000 字符**，换行用 `\n` |
-| `source` | 固定 `"OpenClaw"` —— 平台按此值做品牌化渲染，**不要改** |
+| `source` | 卡片上的**来源 / AI 工具名**（平台按这个值做品牌化渲染）。默认 `"OpenClaw"`（与官方 today-task skill、`hwpush` 一致）；插件的 `source` 配置项可改成任意值 —— 实测自定义值同样返回 `0000000000`，但渲染样式由平台决定，换值后先在真机上确认 |
 | `taskFinishTime` | Unix 秒级时间戳 |
 
 ---

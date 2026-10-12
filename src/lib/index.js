@@ -39,8 +39,11 @@ const DEFAULT_RESULT = "任务已完成";
 
 /**
  * The HIBoard contract brands cards by this value; both the official
- * today-task skill and hwpush send exactly this string, so it is kept as-is
- * for wire compatibility.
+ * today-task skill and hwpush send exactly this string, so it is kept as the
+ * DEFAULT for wire compatibility. It is now overridable via the `source`
+ * config option (the value shows up on the phone as the card's brand / tool
+ * name); the platform accepts other values, but rendering is platform-defined,
+ * so check a real card after changing it.
  */
 const WIRE_SOURCE = "OpenClaw";
 
@@ -62,7 +65,15 @@ const Config = z.object({
 	pushServiceUrl: z.string().default(DEFAULT_SERVICE_URL),
 	timeoutMs: z.number().default(DEFAULT_TIMEOUT_MS),
 	maxContentLength: z.number().default(DEFAULT_MAX_CONTENT_LENGTH),
-	defaultResult: z.string().default(DEFAULT_RESULT)
+	defaultResult: z.string().default(DEFAULT_RESULT),
+	/**
+	 * Card `source` field: the brand / AI-tool name the assistant-today feed
+	 * renders on the card. Defaults to `"OpenClaw"` (same as the official
+	 * today-task skill and hwpush). The endpoint accepts other values, but the
+	 * card styling is platform-defined — verify on a real phone before relying
+	 * on a custom value.
+	 */
+	source: z.string().default(WIRE_SOURCE)
 });
 
 const entryDefaults = {
@@ -70,7 +81,8 @@ const entryDefaults = {
 	pushServiceUrl: DEFAULT_SERVICE_URL,
 	timeoutMs: DEFAULT_TIMEOUT_MS,
 	maxContentLength: DEFAULT_MAX_CONTENT_LENGTH,
-	defaultResult: DEFAULT_RESULT
+	defaultResult: DEFAULT_RESULT,
+	source: WIRE_SOURCE
 };
 
 // ---------------------------------------------------------------- payload
@@ -81,7 +93,7 @@ const entryDefaults = {
  * periodic-task cards together; an empty `scheduleTaskId` yields the
  * one-off standard card.
  */
-export function buildPayload({ authCode, name, content, result, scheduleId }) {
+export function buildPayload({ authCode, name, content, result, scheduleId, source }) {
 	const nowSec = Math.floor(Date.now() / 1000);
 	return {
 		data: {
@@ -94,7 +106,7 @@ export function buildPayload({ authCode, name, content, result, scheduleId }) {
 					summary: name,
 					result,
 					content,
-					source: WIRE_SOURCE,
+					source: String(source ?? "").trim() || WIRE_SOURCE,
 					taskFinishTime: nowSec
 				}
 			]
@@ -162,15 +174,17 @@ export async function sendPush(url, payload, { timeoutMs = DEFAULT_TIMEOUT_MS, s
 			? json.message
 			: json && typeof json.desc === "string" ? json.desc : text.slice(0, 200);
 		if (!response.ok) {
-			return { success: false, code, message: `HTTP ${response.status}: ${message}` };
+			return { success: false, status: response.status, code, message: `HTTP ${response.status}: ${message}` };
 		}
-		if (SUCCESS_CODES.has(code)) return { success: true, code, message };
+		if (SUCCESS_CODES.has(code)) return { success: true, status: response.status, code, message };
 		const hint = KNOWN_ERROR_HINTS[code];
-		return { success: false, code, message: hint ? `${message} ${hint}` : message };
+		return { success: false, status: response.status, code, message: hint ? `${message} ${hint}` : message };
 	} catch (error) {
 		const aborted = error && typeof error === "object" && (error.name === "AbortError" || error.name === "TimeoutError");
 		return {
 			success: false,
+			// 0 = 没能拿到 HTTP 响应（超时 / 网络错误）。下游靠它区分"确定没送达"与"可能已送达"。
+			status: 0,
 			code: "",
 			message: aborted ? `请求超时（${timeoutMs}ms）或已中止` : `网络错误: ${error instanceof Error ? error.message : String(error)}`
 		};
@@ -212,6 +226,9 @@ const pushOutputSchema = {
 		success: { type: "boolean", required: true },
 		code: { type: "string", required: true },
 		message: { type: "string", required: true },
+		// HTTP 状态码；0 表示没能拿到响应（超时 / 网络错误）。
+		// 下游（push-guard 的失败分类）靠它区分 404 坏窗口、405 永久错误与超时。
+		status: { type: "number", required: true },
 		taskName: { type: "string", required: true },
 		pushedAt: { type: "string", required: true },
 		dryRun: { type: "boolean", required: true }
@@ -271,7 +288,7 @@ function hiboardPushTool({ resolveAuthCode, settings }) {
 			// dry-run constructs and validates the payload without sending; it does
 			// not require an authCode (mirrors hwpush --dry-run behaviour).
 			if (args.dry_run) {
-				return { success: true, code: "", message: "dry-run", taskName: name, pushedAt, dryRun: true };
+				return { success: true, code: "", message: "dry-run", status: 0, taskName: name, pushedAt, dryRun: true };
 			}
 
 			const authCode = resolveAuthCode();
@@ -282,7 +299,7 @@ function hiboardPushTool({ resolveAuthCode, settings }) {
 				);
 			}
 
-			const payload = buildPayload({ authCode, name, content, result, scheduleId: args.schedule_id });
+			const payload = buildPayload({ authCode, name, content, result, scheduleId: args.schedule_id, source: settings().source });
 
 			const outcome = await sendPush(settings().pushServiceUrl, payload, {
 				timeoutMs: settings().timeoutMs,
@@ -292,6 +309,7 @@ function hiboardPushTool({ resolveAuthCode, settings }) {
 				success: outcome.success,
 				code: outcome.code,
 				message: outcome.message,
+				status: Number(outcome.status) || 0,
 				taskName: name,
 				pushedAt,
 				dryRun: false
@@ -325,7 +343,8 @@ function hiboardVerifyTool({ resolveAuthCode, settings }) {
 				name,
 				content: "# dsh 连接测试\n\n如果您的手机收到此卡片，说明 dsh-hiboard-push 已配置成功。",
 				result: "测试成功",
-				scheduleId: ""
+				scheduleId: "",
+				source: settings().source
 			});
 			const pushedAt = new Date().toISOString();
 			const outcome = await sendPush(settings().pushServiceUrl, payload, {
@@ -336,6 +355,7 @@ function hiboardVerifyTool({ resolveAuthCode, settings }) {
 				success: outcome.success,
 				code: outcome.code,
 				message: outcome.message,
+				status: Number(outcome.status) || 0,
 				taskName: name,
 				pushedAt,
 				dryRun: false
@@ -357,7 +377,8 @@ function apply(ctx, rawConfig) {
 			pushServiceUrl: resolved.pushServiceUrl || DEFAULT_SERVICE_URL,
 			timeoutMs: Number(resolved.timeoutMs) > 0 ? Number(resolved.timeoutMs) : DEFAULT_TIMEOUT_MS,
 			maxContentLength: Number(resolved.maxContentLength) > 0 ? Number(resolved.maxContentLength) : DEFAULT_MAX_CONTENT_LENGTH,
-			defaultResult: resolved.defaultResult || DEFAULT_RESULT
+			defaultResult: resolved.defaultResult || DEFAULT_RESULT,
+			source: String(resolved.source ?? "").trim() || WIRE_SOURCE
 		};
 	};
 

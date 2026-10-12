@@ -209,7 +209,7 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-push-guard/src/push-guard"
 |---|---|---|
 | **L1 rescue** | 正文出现字面量调用标记，且**该轮**从未真正调用 `hiboard_push` | 用同一解析器还原参数，按原样代为推送 |
 | **L2 promise** | 该轮未推送，但正文**明确承诺了推送**且正文够长 | 用该轮正文补推，`result` 标注"模型未调用推送工具" |
-| **L3 retry** | 工具真调用了但返回失败 | **按错误类别**重试：瞬时可重试（含 **HTTP 404** —— 华为侧 ELB 坏窗口，见 [`docs/ENDPOINT-NOTES.md`](docs/ENDPOINT-NOTES.md)），永久错误（如 `0000900034`）不重试；退避为**指数**（基数 × 2ⁿ⁻¹，封顶 60s），以便跨过几十秒的坏窗口 |
+| **L3 retry** | 工具真调用了但返回失败 | **按错误类别**重试，且**分成两份预算**（`retryCount` / `ambiguousRetryCount`）：<br>· **确定没送达**（ELB 直出的 **HTTP 404**，见 [`docs/ENDPOINT-NOTES.md`](docs/ENDPOINT-NOTES.md)）→ 按 `retryCount`（默认 3）多试几次；<br>· **可能已经送达**（超时 / 无响应 / 5xx / 业务侧未知失败码）→ 只按 `ambiguousRetryCount`（默认 1）少试，因为每次重试都是**新的 `msgId`**、平台不去重，多试就可能多出一张重复卡片；<br>· 永久错误（如 `0000900034`、405）不重试。<br>退避为**指数**（基数 × 2ⁿ⁻¹，封顶 60s），以便跨过几十秒的坏窗口 |
 
 关键实现细节（都是踩出来的）：
 
@@ -240,7 +240,7 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-push-guard/src/push-guard"
 | 端点 | `POST https://hiboard-claw-drcn.ai.dbankcloud.cn/distribution/message/cloud/claw/msg/upload` |
 | 鉴权 | 请求体中的 `authCode`（个人凭据） |
 | 必填字段 | `msgId` `scheduleTaskId` `scheduleTaskName` `summary` `result` `content` `source` `taskFinishTime` |
-| `source` | 固定 `"OpenClaw"`（平台按此值品牌化渲染，**不要改**） |
+| `source` | 卡片上的**来源 / AI 工具名**（平台按此值做品牌化渲染）。默认 `"OpenClaw"`（与官方 today-task skill 一致）；可用插件的 `source` 配置项改成任意值 —— 实测平台接受自定义值，但渲染样式由平台决定，换值后先在真机上看一眼 |
 | 内容上限 | 5000 字符 |
 | 成功码 | `0000000000`（也接受 `"0"`） |
 | 授权码无效 | `0000900034` |
@@ -282,6 +282,7 @@ dsh 会在**每个会话**里自动加载它。现成模板见
 │   ├── AGENTS-rule.md                         全局推送规则模板
 │   ├── INCIDENT-2026-09-27-silent-push-loss.md  ★ 推送静默丢失复盘（三级兜底的由来）
 │   ├── ENDPOINT-NOTES.md                      ★ 端点实测：间歇性 404 的判定与坏窗口自检
+│   ├── UPDATES-2026-10-11.md                   ★ 重复卡片修复 / 凭据出仓 / 重试预算拆分 / source 可配
 │   ├── UPDATES-2026-09-27.md                   ★ 兜底插件 / 可观测性 / schedule_id 双保险
 │   └── UPDATES-2026-09-23.md                  演进汇总（远程访问架构与实测结论）
 └── src/
