@@ -6,6 +6,7 @@
 [![HarmonyOS NEXT](https://img.shields.io/badge/HarmonyOS-NEXT-000000?logo=huawei&logoColor=white)](#)
 [![dsh](https://img.shields.io/badge/DeepSeek%20Harness-0.1.5%20%7C%200.2-4B6BFB)](#)
 [![Node](https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white)](#)
+[![npm](https://img.shields.io/npm/v/dsh-harmonyos-hiboard)](https://www.npmjs.com/package/dsh-harmonyos-hiboard)
 [![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/maybemeibemaybi/dsh-harmonyos-hiboard)
 
 把 **DeepSeek Harness（dsh）** 的对话与任务结果，以 **服务卡片** 形式推送到华为鸿蒙
@@ -117,9 +118,16 @@ TypeError: Cannot read properties of undefined (reading 'validate')
 前置：Windows / macOS / Linux + Node.js 18+ + dsh 已安装 + `pnpm` 已安装。
 
 ```bash
-# 1) 安装为 dsh 插件（从 GitHub 安装，跨平台）
+# 1) 安装为 dsh 插件
+# 推荐走 npm：预构建安装，免掉 allowBuilds 构建授权那一步
+dsh plugin --profile web add dsh-harmonyos-hiboard
+
+# 或者从 GitHub 安装
 dsh plugin --profile web add github:MaybeMeibeMaybi/dsh-harmonyos-hiboard
 ```
+
+> 两者装的是同一份代码。npm 上的是本仓库的构建产物，`repository` 字段指回本仓库；
+> 想装某个具体版本就写 `dsh-harmonyos-hiboard@0.6.0`。
 
 <details>
 <summary>或者从本地克隆安装（改源码 / 调试时用）</summary>
