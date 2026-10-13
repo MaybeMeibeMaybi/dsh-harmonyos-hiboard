@@ -131,7 +131,20 @@ dsh plugin --profile web add "file:<不含空格的路径>"
 
 </details>
 
-**2) 写入授权码** —— 编辑 `~/.dsh/profiles/web/cordis.patch.yml`：
+**2) 填授权码** —— 两种方式，任选其一。
+
+**方式 A（推荐）：图形界面。** 重启 dsh 后打开 **设置 → 插件 → `dsh-harmonyos-hiboard`**，
+在「推送设置」卡片里填写。输入框**两种写法都认**：
+
+```text
+aaaaaaaaaaaa                                                                # 裸授权码
+openclaw config set skills.entries.today-task.config.authCode aaaaaaaaaaaa    # 整条关联指令
+```
+
+粘贴整条关联指令时会**自动取出末尾的授权码**，保存前还会显示打码预览（形如 `••••••••wnAD`），
+所以不会把整段指令误当成授权码存进去。保存后**立即生效，不需要重启**。
+
+**方式 B：配置文件。** 编辑 `~/.dsh/profiles/web/cordis.patch.yml`：
 
 ```yaml
 - id: hiboard-push
@@ -140,6 +153,10 @@ dsh plugin --profile web add "file:<不含空格的路径>"
 ```
 
 授权码获取：手机 **负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体**。
+
+> **解析顺序**：设置页保存的值 → 补丁层 `hiboard-push.config.authCode` → 环境变量 `DSH_HIBOARD_AUTH_CODE`。
+> 设置页会显示**当前生效来源**，所以"我改了一处怎么不生效"一眼可见；
+> 卡片上的「清除」会删掉设置页那份，回退到下一层。
 
 > **装完/改过 `package.json` 后一定要重新注入**：profile 里的
 > `node_modules/dsh-harmonyos-hiboard` 是 pnpm **复制**进去的，不是链接。
@@ -150,33 +167,14 @@ dsh plugin --profile web add "file:<不含空格的路径>"
 
 **3) 重启 dsh**，然后让 agent 调用 `hiboard_push`（记得传 `schedule_id`）。
 
-**4) 装推送兜底（强烈建议）** —— 不装的话，一旦 agent 把推送写成正文（见下节），
-卡片会**静默消失**：
+**4) 推送兜底：已内置，默认开启** —— 无需额外安装。
 
-```bash
-# 推送兜底插件：push-guard（L1 抢救 / L2 承诺兜底 / L3 重试）
-# 注意：push-guard 是本仓库 src/ 下的**子包**，仓库根包是主插件，
-# 所以它不能用 github: 简写安装，需要克隆后指向子目录。
-git clone https://github.com/MaybeMeibeMaybi/dsh-harmonyos-hiboard.git <不含空格的路径>
-dsh plugin --profile web add "file:<不含空格的路径>/src/push-guard"
-```
+原先的独立插件 `dsh-push-guard` 已并入本包（三级兜底：L1 抢救"被写成纯文本的调用"、
+L2 抢救"承诺了却没调用"、L3 按错误类别重试并自动补 `schedule_id`）。
+它在**同一张设置卡片**里有一个开关，**默认开启**，关掉**立即生效**（不必重启）。
 
-`~/.dsh/profiles/web/cordis.patch.yml`：
-
-```yaml
-- insert:
-    - id: push-guard
-      name: dsh-push-guard
-      config:
-        enabled: true
-        rescueEnabled: true          # L1：抢救"写成纯文本的调用"
-        promiseRescueEnabled: true   # L2：抢救"承诺了却没调用"
-        retryEnabled: true           # L3：失败按类别重试
-        authCode: <你的授权码>        # 与 hiboard-push 保持一致
-```
-
-> ⚠️ **同名 `insert` 条目只认第一个**。曾经 v1/v2 各写了一份，
-> 后写的配置被**静默忽略**（排查了十几分钟）。升级时记得替换而不是追加。
+> **从旧版升级**：如果 profile 补丁层里还留着独立的 `push-guard` 条目，请删掉 ——
+> 能力已在本包内，留着会让同一套逻辑挂两份，审计日志也会两处各写一份。
 
 完整步骤（含预检、排错、错误码）见 **[`docs/DEPLOY.md`](docs/DEPLOY.md)**。
 
@@ -188,7 +186,27 @@ dsh plugin --profile web add "file:<不含空格的路径>/src/push-guard"
 |---|---|
 | `hiboard_push` | 推送一张任务卡片：`name`（标题）、`content`（Markdown，≤5000 字符）、`result`（状态标签）、`schedule_id`（**必传**）、`dry_run`（只校验不发送） |
 | `hiboard_verify` | 发送一张「连接测试」卡片，端到端验证授权码与网络 |
-| `hiboard_push_selfcheck` | 由 `dsh-push-guard` 提供：报告兜底插件是否生效、`hiboard_push` 是否已被接管重试、授权码是否配置、接口是否可达、最近一次推送状态 |
+| `hiboard_push_selfcheck` | 报告内置兜底是否生效、`hiboard_push` 是否已被接管重试、授权码是否配置、接口是否可达、最近一次推送状态 |
+
+---
+
+## 设置页（插件卡片）
+
+打开 **设置 → 插件 → `dsh-harmonyos-hiboard`**，卡片提供两件事：
+
+1. **授权码输入框** —— 裸授权码与整条关联指令都认（自动取末尾的码），保存前显示打码预览，
+   保存后**立即生效**；卡片还显示**当前生效来源**（设置页 / 补丁层 / 环境变量），
+   避免"改了一处却不生效"。点「清除」删掉设置页那份，回退到下一层。
+2. **推送兜底开关** —— **默认开启**，关掉**立即生效**（不必重启）。
+
+配置写在 `<用户目录>/.dsh/hiboard-push/config.json`（0600，先写临时文件再原子替换）。
+该文件属于当前系统用户，本机所有 dsh profile 共用一份。
+
+> ⚠️ **部署安全边界**：卡片靠一个注册在 webServer 上的**原始路由**
+> `/hiboard-push/config` 读写配置。它**不继承 dsh Connection 的登录认证**，
+> 本插件也不做 Host / Origin 策略 —— 与 modsearch 同类路由性质相同。
+> 若 dsh 暴露在需要鉴权的入口后面，**鉴权必须同时覆盖这条路由**；
+> 不需要图形界面时，用补丁层 `settingsCard: false` 把路由与卡片一起撤掉。
 
 ---
 
@@ -221,7 +239,7 @@ dsh plugin --profile web add "file:<不含空格的路径>/src/push-guard"
 > 会在卡片**已经推成功**的情况下再推一遍 → **重复卡片**。
 > 原则是：宁可少重试，也不要制造重复卡片。
 
-### 修复：三级兜底插件 `src/push-guard/`
+### 修复：内置三级兜底 `src/lib/push-guard.js`
 
 | 级别 | 触发条件 | 行为 |
 |---|---|---|
@@ -246,8 +264,11 @@ dsh plugin --profile web add "file:<不含空格的路径>/src/push-guard"
 ```
 
 装好之后，先让 agent 调一次 `hiboard_push_selfcheck` 确认三件事：
-**兜底插件生效了、`hiboard_push` 被接管了、授权码配对了**。
+**内置兜底生效了、`hiboard_push` 被接管了、授权码配对了**。
 在这之前，"保险丝到底有没有生效"只能靠猜 —— 本次事故里就真的猜错过一次。
+
+> 兜底已并入主包，**默认开启**；开关在设置页的同一张卡片上，关掉**立即生效**。
+> 因此这里没有"装不装兜底"这一步 —— 只有"要不要关掉它"。
 
 ---
 
@@ -305,12 +326,25 @@ dsh 会在**每个会话**里自动加载它。现成模板见
 │   ├── UPDATES-2026-09-27.md                   ★ 兜底插件 / 可观测性 / schedule_id 双保险
 │   └── UPDATES-2026-09-23.md                  演进汇总（远程访问架构与实测结论）
 └── src/
-    ├── lib/index.js                           插件源码（兼容性修复版）
+    ├── lib/index.js                           宿主半边：两个工具 + 设置页路由 + 兜底装配
+    ├── lib/client.js                          浏览器半边：设置卡片（手写 lazy-CJS，零构建）
+    ├── lib/authcode.js                        授权码解析：裸码 / 整条关联指令
+    ├── lib/config-store.js                    插件自己的配置（原子写、0600、mtime 缓存）
+    ├── lib/push-guard.js                      ★ 内置三级兜底（L1/L2/L3 + 自检 + 审计）
     ├── lib/index.js.upstream-backup           上游原始版本，便于比对
-    ├── cordis.patch.yml                       bundle 补丁（挂载插件用）
-    └── push-guard/                            ★ 推送兜底插件（L1/L2/L3 + 自检 + 审计）
-        ├── lib/index.js
-        └── package.json
+    └── cordis.patch.yml                       bundle 补丁（挂载插件用）
+```
+
+测试（不随 npm 包发布）：
+
+```
+test/
+├── authcode.test.mjs        解析规则 + 宿主/客户端副本对齐
+└── config-store.test.mjs    合并写入 / null 删除 / 坏文件容错
+```
+
+```bash
+npm test
 ```
 
 ---

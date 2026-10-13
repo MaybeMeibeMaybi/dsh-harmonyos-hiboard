@@ -465,11 +465,27 @@ function trimAudit(dir, maxBytes) {
 
 export function apply(ctx, config) {
 	const settings = { ...DEFAULTS, ...(config ?? {}) };
-	if (settings.enabled === false) {
+	/**
+	 * 实时关闭判断：宿主半边可以经 `isDisabled` 传进一个回调（设置页上的开关），
+	 * 于是关掉保险丝**立即生效**，不需要重启 dsh。
+	 * 静态的 `enabled: false`（写在配置里）仍然在挂载时直接不加载。
+	 */
+	const guardOff = () =>
+		settings.enabled === false ||
+		(typeof settings.isDisabled === "function" && settings.isDisabled() === true);
+	if (guardOff()) {
 		ctx.logger?.info?.("[push-guard] 已禁用（enabled: false）");
 		return;
 	}
-	const resolveAuthCode = () => String(settings.authCode || process.env.DSH_HIBOARD_AUTH_CODE || "").trim();
+	// 授权码优先问宿主给的**实时解析器**：并进主插件后，设置页刚存的码
+	// 必须立即对兜底生效，而不是钉在挂载那一刻的值上。
+	// 作为独立插件使用时没有这个回调，退回自己的静态配置 + 环境变量。
+	const resolveAuthCode = () =>
+		String(
+			(typeof settings.resolveAuthCode === "function" ? settings.resolveAuthCode() : settings.authCode) ||
+			process.env.DSH_HIBOARD_AUTH_CODE ||
+			""
+		).trim();
 	const pushUrl = String(settings.pushServiceUrl || DEFAULTS.pushServiceUrl);
 	const maxLen = Number(settings.maxContentLength) > 0 ? Number(settings.maxContentLength) : DEFAULTS.maxContentLength;
 	const cardSource = String(settings.source ?? "").trim() || DEFAULTS.source;
@@ -530,6 +546,8 @@ export function apply(ctx, config) {
 		ctx.effect(() => {
 			const onEvent = (session, event) => {
 				try {
+					// 设置页关掉后，兜底立即停止（不必重启）
+					if (guardOff()) return;
 					if (!event || typeof event !== "object") return;
 					const sessionId = session?.id ?? "?";
 
@@ -621,6 +639,8 @@ export function apply(ctx, config) {
 					const ambiguousAttempts = ambiguousBudget;
 					const fallbackScheduleId = String(settings.defaultScheduleId || DEFAULTS.defaultScheduleId).trim() || DEFAULTS.defaultScheduleId;
 					const wrapped = async (args, exec) => {
+						// 设置页关掉后：不补参、不重试，按原样调用（关闭必须真的关闭）
+						if (guardOff()) return original(args, exec);
 						// ---- 先补 schedule_id，再让工具校验/发送 ----
 						// 为什么必须补：scheduleTaskId 为空时负一屏**只显示一行标题**，
 						// 正文不渲染、详情页点不开（2026-09-27 用户实际遇到）。
@@ -765,7 +785,8 @@ export function apply(ctx, config) {
 						}
 					} catch { /* ignore */ }
 					return {
-						guardActive: true,
+						// 实时值：设置页关掉后这里立刻变 false（hook 还在，但已旁路）
+						guardActive: !guardOff(),
 						hooked,
 						authCode: resolveAuthCode() ? "已配置" : "未配置（推送会失败）",
 						source: cardSource,

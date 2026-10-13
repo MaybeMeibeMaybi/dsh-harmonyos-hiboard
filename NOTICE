@@ -45,6 +45,24 @@ so the differences below can be audited directly.
    `scheduleTaskId` opens a full detail page that renders the whole Markdown body.
    Always pass `schedule_id`.
 
+5. **Added a settings card on the Plugins page** (`src/lib/client.js`, plus the host
+   route in `src/lib/index.js`). dsh removed the host-side settings API this project
+   originally used, and it renders no form from a settings schema, so the card is
+   contributed as slot content for `plugins.bundle.config`. The authCode field accepts
+   either the bare code or the whole OpenClaw linking command
+   (`openclaw config set skills.entries.today-task.config.authCode <code>`) and shows a
+   masked preview before saving. Values are stored in this plugin's own
+   `<home>/.dsh/hiboard-push/config.json` (0600), which now takes precedence over the
+   cordis entry config, which in turn takes precedence over the environment variable;
+   the card displays the effective source.
+
+6. **Folded the separate `dsh-push-guard` plugin into this package**
+   (`src/lib/push-guard.js`). The three-level safety net (L1 rescue of a push emitted as
+   literal text, L2 rescue of a promised-but-never-made push, L3 classified retry with
+   `schedule_id` backfill) is now on by default, and the settings card switches it off
+   live. The upstream logic is unchanged; the additions are a live on/off check and a
+   live authCode resolver so the card's values apply without a restart.
+
 ## Compatibility note
 
 The network contract (`POST .../msg/upload`, the 8 `msgContent` fields, `source: "OpenClaw"`,

@@ -11,9 +11,18 @@
  * The agent-facing face is a `hiboard_push` tool (plus a `hiboard_verify`
  * onboarding tool), so a finished task can be pushed in the same turn it
  * completes. The authCode is resolved at call time from, in order:
- *   1. the `hiboard-push` settings section (dsh Settings UI / settings.yaml)
- *   2. the plugin's cordis entry `config.authCode`
+ *   1. this plugin's own settings file, `<home>/.dsh/hiboard-push/config.json`,
+ *      written by the settings card on the Plugins page (Settings → Plugins →
+ *      this bundle). The card accepts either the bare code or the whole
+ *      OpenClaw linking command — see authcode.js.
+ *   2. the plugin's cordis entry `config.authCode` (the profile patch layer,
+ *      `~/.dsh/profiles/<name>/cordis.patch.yml`)
  *   3. the `DSH_HIBOARD_AUTH_CODE` environment variable
+ *
+ * The push safety net (formerly the separate `dsh-push-guard` plugin: L1 rescue,
+ * L2 promise rescue, L3 classified retry + schedule_id backfill) now ships
+ * inside this package as push-guard.js. It is ON by default and the settings
+ * card switches it off live — no restart.
  *
  * No runtime npm dependencies beyond the dsh peer packages: HTTP uses the
  * Node built-in `fetch`.
@@ -21,6 +30,9 @@
 import { randomUUID } from "node:crypto";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
+import { maskAuthCode, parseAuthCodeInput } from "./authcode.js";
+import { configPath, readStore, writeStore } from "./config-store.js";
+import { apply as applyPushGuard } from "./push-guard.js";
 
 // ---------------------------------------------------------------- identity
 
@@ -59,7 +71,7 @@ const KNOWN_ERROR_HINTS = {
 };
 
 
-/** Settings-section + composition-entry schema (all optional; validated on push). */
+/** Settings + composition-entry schema (all optional; validated on push). */
 const Config = z.object({
 	authCode: z.string().role("secret"),
 	pushServiceUrl: z.string().default(DEFAULT_SERVICE_URL),
@@ -73,7 +85,28 @@ const Config = z.object({
 	 * card styling is platform-defined — verify on a real phone before relying
 	 * on a custom value.
 	 */
-	source: z.string().default(WIRE_SOURCE)
+	source: z.string().default(WIRE_SOURCE),
+
+	// ---- 推送兜底（原 dsh-push-guard 插件，现已并入本包）----
+	// 默认全开。设置页上的开关写进插件自己的配置，**立即生效**，不用重启。
+	/** 总开关：关掉后不抢救、不重试、不补 schedule_id（hiboard_push 原样工作）。 */
+	guardEnabled: z.boolean().default(true),
+	/** L1：抢救"被写成纯文本的调用"。 */
+	guardRescueEnabled: z.boolean().default(true),
+	/** L2：抢救"正文承诺了推送、却没调用工具"。 */
+	guardPromiseRescueEnabled: z.boolean().default(true),
+	/** L3：给失败的 hiboard_push 自动重试（按错误类别分预算）。 */
+	guardRetryEnabled: z.boolean().default(true),
+	/** **确定没送达**（ELB 直出的 404）最多重试几次。 */
+	guardRetryCount: z.number().default(3),
+	/** **可能已送达**（超时/5xx）最多重试几次；每次重试都是新 msgId，故压到 1。 */
+	guardAmbiguousRetryCount: z.number().default(1),
+	/** 重试退避基数（毫秒）：基数 × 2ⁿ⁻¹，封顶 60s。 */
+	guardRetryDelayMs: z.number().default(3000),
+	/** hiboard_push 没带有效 schedule_id 时自动补的值（为空则卡片点不开）。 */
+	defaultScheduleId: z.string().default("dsh_worklog"),
+	/** 设置页路由开关；关掉后 `/hiboard-push/config` 不注册，浏览器半边也停手。 */
+	settingsCard: z.boolean().default(true)
 });
 
 const entryDefaults = {
@@ -82,7 +115,16 @@ const entryDefaults = {
 	timeoutMs: DEFAULT_TIMEOUT_MS,
 	maxContentLength: DEFAULT_MAX_CONTENT_LENGTH,
 	defaultResult: DEFAULT_RESULT,
-	source: WIRE_SOURCE
+	source: WIRE_SOURCE,
+	guardEnabled: true,
+	guardRescueEnabled: true,
+	guardPromiseRescueEnabled: true,
+	guardRetryEnabled: true,
+	guardRetryCount: 3,
+	guardAmbiguousRetryCount: 1,
+	guardRetryDelayMs: 3000,
+	defaultScheduleId: "dsh_worklog",
+	settingsCard: true
 };
 
 // ---------------------------------------------------------------- payload
@@ -294,8 +336,9 @@ function hiboardPushTool({ resolveAuthCode, settings }) {
 			const authCode = resolveAuthCode();
 			if (!authCode) {
 				throw new Error(
-					"hiboard_push: 未配置授权码（authCode）。请先在 dsh 设置面板的 hiboard-push 分区填写，或设置环境变量 " +
-					`${AUTH_CODE_ENV}。授权码获取：负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体。`
+					"hiboard_push: 未配置授权码（authCode）。请在 dsh 的「插件」页打开本插件的设置卡片填写" +
+					"（支持整条关联指令或裸授权码），或写进 profile 补丁层 hiboard-push.config.authCode，" +
+					`或设置环境变量 ${AUTH_CODE_ENV}。授权码获取：负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体。`
 				);
 			}
 
@@ -333,8 +376,9 @@ function hiboardVerifyTool({ resolveAuthCode, settings }) {
 			const authCode = resolveAuthCode();
 			if (!authCode) {
 				throw new Error(
-					"hiboard_verify: 未配置授权码（authCode）。请先在 dsh 设置面板的 hiboard-push 分区填写，或设置环境变量 " +
-					`${AUTH_CODE_ENV}。授权码获取：负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体。`
+					"hiboard_verify: 未配置授权码（authCode）。请在 dsh 的「插件」页打开本插件的设置卡片填写" +
+					"（支持整条关联指令或裸授权码），或写进 profile 补丁层 hiboard-push.config.authCode，" +
+					`或设置环境变量 ${AUTH_CODE_ENV}。授权码获取：负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体。`
 				);
 			}
 			const name = "dsh 连接测试";
@@ -366,36 +410,217 @@ function hiboardVerifyTool({ resolveAuthCode, settings }) {
 
 // ---------------------------------------------------------------- plugin
 
+/**
+ * 设置页路由：浏览器半边通过它读写本插件自己的配置。
+ *
+ * ⚠️ 与 modsearch 同样的边界：这是**直接注册在 webServer 上的原始路由**，
+ * 不继承 dsh Connection 的登录认证，本插件也不自己做 Host / Origin 策略。
+ * 部署时鉴权必须同时覆盖本路由与 dsh 本身；不想暴露就把 settingsCard 设为 false。
+ */
+function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
+	const SOURCE_LABEL = {
+		settings: "设置页（本插件配置）",
+		entry: "profile 补丁层 hiboard-push.config.authCode",
+		env: `环境变量 ${AUTH_CODE_ENV}`,
+		none: "未配置"
+	};
+	const summary = () => {
+		const info = authCodeInfo();
+		const s = settings();
+		return {
+			authCode: {
+				configured: Boolean(info.code),
+				masked: maskAuthCode(info.code),
+				source: info.source,
+				sourceLabel: SOURCE_LABEL[info.source] ?? info.source
+			},
+			guard: {
+				enabled: s.guardEnabled,
+				rescueEnabled: s.guardRescueEnabled,
+				promiseRescueEnabled: s.guardPromiseRescueEnabled,
+				retryEnabled: s.guardRetryEnabled,
+				retryCount: s.guardRetryCount,
+				ambiguousRetryCount: s.guardAmbiguousRetryCount,
+				defaultScheduleId: s.defaultScheduleId
+			},
+			endpoint: s.pushServiceUrl,
+			storeFile
+		};
+	};
+
+	return {
+		name: "hiboard-push-config",
+		kind: "exact",
+		path: "/hiboard-push/config",
+		handler: async (req, res) => {
+			const send = (status, body) => {
+				res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
+				res.end(JSON.stringify(body));
+			};
+			if (req.method === "GET") {
+				try {
+					send(200, summary());
+				} catch (error) {
+					send(409, { error: String(error?.message ?? error) });
+				}
+				return;
+			}
+			if (req.method !== "POST") {
+				res.writeHead(405).end();
+				return;
+			}
+			try {
+				const chunks = [];
+				let total = 0;
+				for await (const chunk of req) {
+					total += chunk.length;
+					if (total > 16 * 1024) {
+						send(413, { error: "config payload too large" });
+						req.destroy();
+						return;
+					}
+					chunks.push(chunk);
+				}
+				const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+				const patch = {};
+				const notes = [];
+
+				// ---- 授权码：完整指令或裸码都行；空串表示"清除覆盖" ----
+				if (Object.prototype.hasOwnProperty.call(body, "authCode")) {
+					const raw = String(body.authCode ?? "");
+					if (!raw.trim()) {
+						// 清成 null → writeStore 会删掉这个键，解析自然回退到补丁层/环境变量
+						patch.authCode = null;
+						notes.push("已清除设置页里的授权码，改用下方「当前生效来源」指出的那一份。");
+					} else {
+						const parsed = parseAuthCodeInput(raw);
+						if (!parsed.ok) {
+							send(400, { error: parsed.message, reason: parsed.reason });
+							return;
+						}
+						patch.authCode = parsed.code;
+						notes.push(`${parsed.note}（${maskAuthCode(parsed.code)}）`);
+					}
+				}
+
+				// ---- 兜底开关：布尔直接落盘，立即生效 ----
+				for (const key of ["guardEnabled", "guardRescueEnabled", "guardPromiseRescueEnabled", "guardRetryEnabled"]) {
+					if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = body[key] === true;
+				}
+				if (Object.prototype.hasOwnProperty.call(body, "defaultScheduleId")) {
+					const text = String(body.defaultScheduleId ?? "").trim();
+					patch.defaultScheduleId = text || null;
+				}
+
+				if (Object.keys(patch).length === 0) {
+					send(400, { error: "没有可保存的字段" });
+					return;
+				}
+				writeStore(patch, storeFile);
+				send(200, { ...summary(), notes });
+			} catch (error) {
+				send(400, { error: String(error?.message ?? error) });
+			}
+		}
+	};
+}
+
+// ---------------------------------------------------------------- plugin
+
 function apply(ctx, rawConfig) {
 	const entry = { ...entryDefaults, ...(rawConfig ?? {}) };
-	let source = () => entry;
+	const storeFile = configPath();
+
+	/**
+	 * 合并后的原始配置：设置页写入的存储覆盖 loader entry。
+	 * 每次都重新读（readStore 带 mtime 缓存），所以设置页保存后**立即生效**，
+	 * 不需要重启 —— 这也是那个实时开关能成立的前提。
+	 */
+	const merged = () => ({ ...entry, ...readStore(storeFile) });
 
 	const settings = () => {
-		const resolved = source();
+		const resolved = merged();
 		return {
 			authCode: resolved.authCode ?? "",
 			pushServiceUrl: resolved.pushServiceUrl || DEFAULT_SERVICE_URL,
 			timeoutMs: Number(resolved.timeoutMs) > 0 ? Number(resolved.timeoutMs) : DEFAULT_TIMEOUT_MS,
 			maxContentLength: Number(resolved.maxContentLength) > 0 ? Number(resolved.maxContentLength) : DEFAULT_MAX_CONTENT_LENGTH,
 			defaultResult: resolved.defaultResult || DEFAULT_RESULT,
-			source: String(resolved.source ?? "").trim() || WIRE_SOURCE
+			source: String(resolved.source ?? "").trim() || WIRE_SOURCE,
+			guardEnabled: resolved.guardEnabled !== false,
+			guardRescueEnabled: resolved.guardRescueEnabled !== false,
+			guardPromiseRescueEnabled: resolved.guardPromiseRescueEnabled !== false,
+			guardRetryEnabled: resolved.guardRetryEnabled !== false,
+			guardRetryCount: Number(resolved.guardRetryCount) >= 0 ? Number(resolved.guardRetryCount) : 3,
+			guardAmbiguousRetryCount: Number(resolved.guardAmbiguousRetryCount) >= 0 ? Number(resolved.guardAmbiguousRetryCount) : 1,
+			guardRetryDelayMs: Number(resolved.guardRetryDelayMs) > 0 ? Number(resolved.guardRetryDelayMs) : 3000,
+			defaultScheduleId: String(resolved.defaultScheduleId ?? "").trim() || "dsh_worklog",
+			settingsCard: resolved.settingsCard !== false
 		};
 	};
 
-	const resolveAuthCode = () => {
-		const fromSettings = settings().authCode.trim();
-		if (fromSettings) return fromSettings;
-		const fromEnv = (process.env[AUTH_CODE_ENV] ?? "").trim();
-		if (fromEnv) return fromEnv;
-		return "";
+	/**
+	 * authCode 的解析结果（值 + 来源）。
+	 * 顺序：设置页存储 → loader entry（profile 补丁层）→ 环境变量。
+	 *
+	 * 为什么要带 source：能配它的地方有三处，界面不直说"当前生效的是哪个"，
+	 * 就一定会出现"我改了这里怎么不生效"。设置页把 sourceLabel 显示出来。
+	 */
+	const authCodeInfo = () => {
+		const stored = String(readStore(storeFile).authCode ?? "").trim();
+		if (stored) return { code: stored, source: "settings" };
+		const fromEntry = String(entry.authCode ?? "").trim();
+		if (fromEntry) return { code: fromEntry, source: "entry" };
+		const fromEnv = String(process.env[AUTH_CODE_ENV] ?? "").trim();
+		if (fromEnv) return { code: fromEnv, source: "env" };
+		return { code: "", source: "none" };
 	};
+	const resolveAuthCode = () => authCodeInfo().code;
 
 	ctx.tools.register(hiboardPushTool({ resolveAuthCode, settings }));
 	ctx.tools.register(hiboardVerifyTool({ resolveAuthCode, settings }));
 
-	ctx.logger?.info?.("[hiboard-push] started; authCode %s, endpoint %s",
-		resolveAuthCode() ? "configured" : "MISSING (set DSH_HIBOARD_AUTH_CODE or the hiboard-push settings section)",
-		settings().pushServiceUrl);
+	// ---- 推送兜底（原 dsh-push-guard，现并入本包）：默认开启，可实时关闭 ----
+	applyPushGuard(ctx, {
+		// 静态值：只有把 guardEnabled:false 写死在配置里，才会整个不加载
+		enabled: entry.guardEnabled !== false,
+		// 实时值：每次判定都重新读，设置页一关就立即停
+		isDisabled: () => settings().guardEnabled !== true,
+		rescueEnabled: settings().guardRescueEnabled,
+		promiseRescueEnabled: settings().guardPromiseRescueEnabled,
+		retryEnabled: settings().guardRetryEnabled,
+		retryCount: settings().guardRetryCount,
+		ambiguousRetryCount: settings().guardAmbiguousRetryCount,
+		retryDelayMs: settings().guardRetryDelayMs,
+		// 让兜底走"实时解析"而不是把挂载时的值钉死，
+		// 否则设置页里新存的授权码要等重启才对兜底生效。
+		resolveAuthCode,
+		pushServiceUrl: settings().pushServiceUrl,
+		maxContentLength: settings().maxContentLength,
+		defaultResult: settings().defaultResult,
+		defaultScheduleId: settings().defaultScheduleId,
+		source: settings().source
+	});
+
+	// ---- 设置页路由 ----
+	// webServer 只在 web profile 存在，而 cordis 没有"可选注入"的写法，
+	// 所以走一次 scoped inject：服务不在时闭包根本不执行，插件照常加载。
+	if (settings().settingsCard && typeof ctx.inject === "function") {
+		ctx.inject(["webServer"], (scope) => {
+			const route = buildConfigRoute({ authCodeInfo, settings, storeFile });
+			// 挂在 effect 上：插件被关掉时路由一起撤下，否则它会继续为一个
+			// 已关闭的插件读写配置（modsearch 踩过这个坑，见其 dsh/index.js 注释）。
+			scope.effect(() => scope.webServer.register(route), "hiboard-push: settings route");
+		});
+	}
+
+	ctx.logger?.info?.(
+		"[hiboard-push] started; authCode %s (来源: %s), endpoint %s, 推送兜底 %s",
+		resolveAuthCode() ? "configured" : "MISSING (设置页填写，或 profile 补丁层 hiboard-push.config.authCode，或环境变量 " + AUTH_CODE_ENV + ")",
+		authCodeInfo().source,
+		settings().pushServiceUrl,
+		settings().guardEnabled ? "ON" : "OFF"
+	);
 }
 
 export { apply, Config, inject, name };

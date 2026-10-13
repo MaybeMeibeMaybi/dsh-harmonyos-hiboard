@@ -51,7 +51,12 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-harmonyos-hiboard"
 
 ## 第 3 步：写入授权码
 
-编辑（不存在就新建）`~/.dsh/profiles/web/cordis.patch.yml`，加入：
+**推荐做法（图形界面）**：不用命令行 —— 打开 **设置 → 插件 → `dsh-harmonyos-hiboard`**，
+在「推送设置」卡片里填。输入框**裸授权码**和**整条关联指令**
+（`openclaw config set skills.entries.today-task.config.authCode <AUTH_CODE>`）都认，
+保存后立即生效，并显示当前生效来源。
+
+**命令行做法**：编辑（不存在就新建）`~/.dsh/profiles/web/cordis.patch.yml`，加入：
 
 ```yaml
 - id: hiboard-push
@@ -59,8 +64,10 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-harmonyos-hiboard"
     authCode: <AUTH_CODE>
 ```
 
-**为什么放这里**：插件从自己这条 loader entry 的 `config.authCode` 读取授权码。
-不要放 `~/.dsh/.env` —— `DSH_HIBOARD_AUTH_CODE` 是 bootstrap-only 变量，
+**解析顺序**：设置页存储（`<用户目录>/.dsh/hiboard-push/config.json`）→ 上面这条 loader entry
+的 `config.authCode` → 环境变量 `DSH_HIBOARD_AUTH_CODE`。设置页会显示当前生效来源。
+
+**不要放 `~/.dsh/.env`** —— `DSH_HIBOARD_AUTH_CODE` 是 bootstrap-only 变量，
 dsh 会**拒绝启动**并报 `only the launching environment may set`。
 
 ---
