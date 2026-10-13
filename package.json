@@ -1,7 +1,7 @@
 {
   "name": "dsh-harmonyos-hiboard",
-  "version": "0.7.0",
-  "description": "把 dsh 的任务结果推送到华为鸿蒙负一屏服务卡片；设置页可直接粘贴关联指令；内置推送兜底，默认开启。 ｜ Push dsh task results to Huawei HarmonyOS assistant-today cards, with a settings card and a push safety net that is on by default.",
+  "version": "0.7.1",
+  "description": "把DSH的任务结果，以服务卡片形式推送到华为鸿蒙负一屏\nPush DSH task results to the Huawei HarmonyOS assistant-today screen as service cards.",
   "author": "Jim Chen",
   "license": "MIT",
   "repository": {
