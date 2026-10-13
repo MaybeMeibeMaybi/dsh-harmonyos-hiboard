@@ -1,7 +1,7 @@
 {
   "name": "dsh-harmonyos-hiboard",
-  "version": "0.6.0",
-  "description": "Push DeepSeek Harness (dsh) task results to Huawei HarmonyOS assistant-today service cards, with a settings card that accepts either the bare authCode or the whole OpenClaw linking command, plus a built-in push safety net (rescue / promise rescue / classified retry) that is on by default. Fixed for dsh 0.1.5 / cordis 4 and compatible with dsh 0.2 (peer-range gate).",
+  "version": "0.7.0",
+  "description": "把 dsh 的任务结果推送到华为鸿蒙负一屏服务卡片；设置页可直接粘贴关联指令；内置推送兜底，默认开启。 ｜ Push dsh task results to Huawei HarmonyOS assistant-today cards, with a settings card and a push safety net that is on by default.",
   "author": "Jim Chen",
   "license": "MIT",
   "repository": {

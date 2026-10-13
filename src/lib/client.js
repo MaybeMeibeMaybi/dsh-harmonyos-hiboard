@@ -1,33 +1,36 @@
 // dsh-harmonyos-hiboard 的浏览器半边：插件设置卡片。
 //
-// dsh 不会从设置 schema 自动生成表单，所以卡片必须**作为插槽内容贡献**，
-// 而不是声明出来：从 dsh 0.1.6-alpha.2 起挂在 `plugins.bundle.config`
-// （「插件」页里该 bundle 自己的页面上），更早的版本挂在设置页的
-// `settings.plugin.item`。这里两个都挂，宿主声明哪个就填哪个。
+// dsh 不会从设置 schema 自动生成表单，所以卡片必须**作为插槽内容贡献**：
+// 从 dsh 0.1.6-alpha.2 起挂在 `plugins.bundle.config`（主界面侧栏「插件」面板里
+// 该 bundle 自己的页面上），更早的版本挂在设置页的 `settings.plugin.item`。
+// 两个都挂，宿主声明哪个就填哪个。
 //
-// 手写在 lazy-CJS bundle 协议里（window.__ModuleLoader__.load + 返回 cordis
-// 插件导出的 factory），所以**没有构建步骤**，也不 import 任何 dsh 客户端包 ——
-// 与宿主半边同样的零依赖立场。
+// 手写在 lazy-CJS bundle 协议里（window.__ModuleLoader__.load + 返回 cordis 插件
+// 导出的 factory），所以**没有构建步骤**。
+//
+// 控件一律用官方原语（Button / Switch / Input）：它们的配色由
+// `--dsw-alias-button-*` 等主题令牌驱动，深浅色主题都自动正确。
+// 第一版这些控件是手搓样式（自己拼 background / color），这正是它们在深色模式下
+// 不可读的原因 —— 所以这里不再自己决定控件配色。
 //
 // 它读写宿主半边的 `/hiboard-push/config`：授权码存进插件自己的配置文件，
-// 浏览器永远拿不到已保存的值（只拿打码与来源），留空保存也不会把已存的值清掉。
+// 浏览器永远拿不到已保存的明文（只拿打码值与来源）。
 window.__ModuleLoader__.load({
   id: 'dsh-harmonyos-hiboard',
   factory: (require) => {
     var module = { exports: {} };
     var exports = module.exports;
 
-    // 「插件」页按 npm 包名分发某个 bundle 的配置，这个 key 必须与包名一致。
+    // 「插件」面板按 npm 包名分发某个 bundle 的配置，这个 key 必须与包名一致。
     var PACKAGE_NAME = 'dsh-harmonyos-hiboard';
     var ROUTE = '/hiboard-push/config';
 
     // 授权码的字符集与长度区间 —— 与宿主半边 src/lib/authcode.js 同一套规则。
     // 客户端 bundle 无法 import 宿主模块，所以这里是**刻意的副本**：
-    // 两边规则必须一起改，改动点在此注明。
+    // 两边规则必须一起改，仓库里有对齐测试盯着（test/authcode.test.mjs）。
     var CODE_PATTERN = /^[A-Za-z0-9_-]{6,128}$/;
     var COMMAND_HINTS = /(openclaw|config\s+set|skills\.entries|today-task|authCode)/i;
 
-    // 解析用户输入：整条关联指令或裸授权码都认（取指令的最后一个词）。
     function parseAuthCodeInput(raw) {
       var original = typeof raw === 'string' ? raw : '';
       if (!original.trim()) return { ok: false, reason: 'empty' };
@@ -45,26 +48,26 @@ window.__ModuleLoader__.load({
       var tokens = text.split(/\s+/).filter(Boolean);
       var last = tokens[tokens.length - 1].replace(/^[`'"]+/, '').replace(/[`'"]+$/, '');
       if (!CODE_PATTERN.test(last)) return { ok: false, reason: 'invalid' };
-      return {
-        ok: true,
-        code: last,
-        shape: 'command',
-        // 不像常见指令时也照取最后一个词，但让界面说清楚这是"猜"的
-        guessed: !COMMAND_HINTS.test(text)
-      };
+      return { ok: true, code: last, shape: 'command', guessed: !COMMAND_HINTS.test(text) };
     }
 
     function maskAuthCode(code) {
       var s = typeof code === 'string' ? code : '';
       if (!s) return '';
       if (s.length <= 4) return new Array(s.length + 1).join('•');
-      var dots = new Array(Math.min(s.length - 4, 12) + 1).join('•');
-      return dots + s.slice(-4);
+      return new Array(Math.min(s.length - 4, 12) + 1).join('•') + s.slice(-4);
+    }
+
+    // 审计时间是 ISO 串；面板只想要「最近几次」，显示到分钟就够。
+    function shortTime(iso) {
+      var s = String(iso || '');
+      if (s.length < 16) return s;
+      return s.slice(5, 10).replace('-', '/') + ' ' + s.slice(11, 16);
     }
 
     // ------------------------------------------------------------ 文案
-    // 两组短标签而不是一套 locale bundle：卡片上就这些字，
-    // 为它们装一套本地化机制比它标注的东西还重。
+    // 两组短标签而不是一套 locale bundle：卡片上就这些字，为它们装一套
+    // 本地化机制比它标注的东西还重。
     var TEXT = {
       zh: {
         section: '推送设置',
@@ -74,21 +77,32 @@ window.__ModuleLoader__.load({
         source: '当前生效来源',
         placeholder: '粘贴授权码，或整条关联指令…',
         save: '保存',
-        saving: '保存中…',
         clear: '清除',
         commandHint:
-          '可以直接粘贴整条关联指令，例如 openclaw config set skills.entries.today-task.config.authCode <授权码> —— 会自动从末尾取出授权码。',
+          '也可以直接粘贴整条关联指令，例如 openclaw config set skills.entries.today-task.config.authCode <授权码>，会自动从末尾取出授权码。',
         willExtract: '将从这条指令中取出授权码：',
         bareOk: '将按裸授权码保存：',
         invalid: '这串内容不像授权码（只允许字母、数字、下划线、连字符，6–128 位）。',
         emptyErr: '请先填入授权码或整条关联指令。',
         whereHint:
-          '授权码获取：手机 负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体。它不会存进浏览器，字段在保存后清空。',
-        guardTitle: '推送兜底（保险丝）',
+          '授权码获取：手机 负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体。不存进浏览器，字段保存后清空。',
+        guardTitle: '推送兜底',
         guardOn: '已开启',
         guardOff: '已关闭',
-        guardHint:
-          'L1 抢救"被写成纯文本的调用"、L2 抢救"承诺了推送却没调用"、L3 按错误类别重试并自动补 schedule_id。默认开启，关掉立即生效。',
+        guardHint: '默认开启，建议保持开启。模型漏调用或调用失败时，它替你补上，卡片就不会悄悄丢掉。',
+        guardWhat:
+          '① 模型把调用写成了纯文本 → 替你补推　② 模型只说“推给你”却没真调用 → 替你补推　③ 调用失败 → 按错误类型重试',
+        guardBudget: function (g) {
+          return '重试预算：确定未送达 ' + g.retryCount + ' 次 / 可能已送达 ' + g.ambiguousRetryCount + ' 次　·　schedule_id 兜底：' + g.defaultScheduleId;
+        },
+        debugTitle: '兜底战绩',
+        debugSummary: function (c) {
+          return '已救回 ' + (c.retryOk + c.rescueOk) + ' 次（重试 ' + c.retryOk + ' · 补推 ' + c.rescueOk + '）';
+        },
+        debugEmpty: '还没有需要兜底的记录 —— 每次推送都成功调用了工具。',
+        debugNone: '兜底还没有运行记录。',
+        kindRetry: '重试',
+        kindRescue: '补推',
         loadFailed: '读取配置失败',
         saveFailed: '保存失败',
         unavailable: '设置路由不可用（宿主未提供）。'
@@ -101,29 +115,39 @@ window.__ModuleLoader__.load({
         source: 'Effective source',
         placeholder: 'Paste the authCode, or the whole linking command…',
         save: 'Save',
-        saving: 'saving…',
         clear: 'Clear',
         commandHint:
-          'You may paste the whole linking command, e.g. openclaw config set skills.entries.today-task.config.authCode <code> — the code is taken from the end.',
+          'You may also paste the whole linking command, e.g. openclaw config set skills.entries.today-task.config.authCode <code>; the code is taken from the end.',
         willExtract: 'Auth code taken from that command: ',
         bareOk: 'Will be saved as a bare auth code: ',
         invalid: 'That does not look like an auth code (letters, digits, underscore, hyphen; 6–128).',
         emptyErr: 'Enter an auth code or the whole linking command first.',
         whereHint:
-          'Get the code on the phone: 负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体. It is never stored in the browser; the field clears after saving.',
+          'Get the code on the phone: 负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体. Never stored in the browser; the field clears after saving.',
         guardTitle: 'Push safety net',
         guardOn: 'on',
         guardOff: 'off',
-        guardHint:
-          'L1 rescues a push emitted as literal text, L2 rescues a promised but never-made push, L3 retries by failure class and backfills schedule_id. On by default; switching it off takes effect immediately.',
+        guardHint: 'On by default and best left on. When the model misses the call or a call fails, it steps in so a card is not silently lost.',
+        guardWhat:
+          '1) the model wrote the call as plain text → it pushes for you　2) the model promised a push but never called → it pushes for you　3) a call failed → it retries by error type',
+        guardBudget: function (g) {
+          return 'Retry budget: definitely-undelivered ' + g.retryCount + ' / possibly-delivered ' + g.ambiguousRetryCount + '　·　schedule_id fallback: ' + g.defaultScheduleId;
+        },
+        debugTitle: 'Rescues so far',
+        debugSummary: function (c) {
+          return 'Saved ' + (c.retryOk + c.rescueOk) + ' (retries ' + c.retryOk + ', pushes ' + c.rescueOk + ')';
+        },
+        debugEmpty: 'Nothing needed rescuing yet — every push called the tool successfully.',
+        debugNone: 'The safety net has no run records yet.',
+        kindRetry: 'retry',
+        kindRescue: 'rescue',
         loadFailed: 'Could not load the configuration',
         saveFailed: 'Could not save',
         unavailable: 'The settings route is unavailable (host did not provide it).'
       }
     };
 
-    // dsh 的语言：优先问 locale 服务（可能晚于卡片就绪，故在渲染时读），
-    // 其次看页面 lang，最后看浏览器语言。
+    /** dsh 的语言：优先问 locale 服务（可能晚于卡片就绪，故在渲染时读），其次页面 lang。 */
     function pickLang(localeRef) {
       try {
         var locale = localeRef && localeRef.current;
@@ -144,28 +168,27 @@ window.__ModuleLoader__.load({
     }
 
     // ------------------------------------------------------------ 卡片
-    // 用原生元素 + dsw 的 CSS 变量，而不是 @deepseek-ai/dsh-client-ui-primitives：
-    // 少一个需要跟随宿主版本变化的接口面。这些变量在 dsh web 的主题里都有定义，
-    // 取不到时用中性回退值，卡片在别的宿主上也不至于看不清。
-    function Card(react, localeRef) {
+    function Card(react, ui, localeRef) {
       var h = react.createElement;
       var useState = react.useState;
       var useEffect = react.useEffect;
+      var Button = ui.Button;
+      var Switch = ui.Switch;
+      var Input = ui.Input;
 
+      // 只留排版用的中性令牌：**控件配色全部交给官方原语**，免得深浅色各错一次。
       var V = {
-        label: 'var(--dsw-alias-label-primary, currentColor)',
         sub: 'var(--dsw-alias-label-tertiary, rgba(127,127,127,0.9))',
         border: 'var(--dsw-alias-border-l2, rgba(127,127,127,0.28))',
-        bg: 'var(--dsw-alias-bg-layer-2, rgba(127,127,127,0.06))',
-        accent: 'var(--dsw-alias-brand-primary, #4b6bfb)',
-        danger: 'var(--dsw-alias-label-error, #d9534f)'
+        danger: 'var(--dsw-alias-label-error, #d9534f)',
+        ok: 'var(--dsw-alias-label-success, #3ba55d)'
       };
 
       return function HiboardConfigCard() {
         var t = TEXT[pickLang(localeRef)];
-        var summaryState = useState({ loading: true, data: null, error: '' });
-        var summary = summaryState[0];
-        var setSummary = summaryState[1];
+        var state = useState({ loading: true, data: null, error: '' });
+        var summary = state[0];
+        var setSummary = state[1];
         var draftState = useState('');
         var draft = draftState[0];
         var setDraft = draftState[1];
@@ -175,6 +198,9 @@ window.__ModuleLoader__.load({
         var noteState = useState('');
         var note = noteState[0];
         var setNote = noteState[1];
+        var showDebugState = useState(true);
+        var showDebug = showDebugState[0];
+        var setShowDebug = showDebugState[1];
 
         var refresh = function () {
           return fetch(ROUTE, { headers: { accept: 'application/json' } })
@@ -182,26 +208,25 @@ window.__ModuleLoader__.load({
               if (!response.ok) throw new Error('HTTP ' + response.status);
               return response.json();
             })
-            .then(function (data) {
-              setSummary({ loading: false, data: data, error: '' });
-            })
+            .then(function (data) { setSummary({ loading: false, data: data, error: '' }); })
             .catch(function (error) {
               setSummary({ loading: false, data: null, error: String((error && error.message) || error) });
             });
         };
 
         useEffect(function () {
-          // 路由不存在（settingsCard: false，或非 web profile）时只提示，
-          // 不假装卡片生效 —— 那正是"关掉一个功能"该有的样子。
-          fetch(ROUTE, { method: 'GET' }).then(function (response) {
-            if (response.status === 404) {
-              setSummary({ loading: false, data: null, error: t.unavailable });
-              return;
-            }
-            refresh();
-          }).catch(function (error) {
-            setSummary({ loading: false, data: null, error: String((error && error.message) || error) });
-          });
+          // 路由不存在（settingsCard: false，或非 web profile）时只提示，不假装卡片生效
+          fetch(ROUTE, { method: 'GET' })
+            .then(function (response) {
+              if (response.status === 404) {
+                setSummary({ loading: false, data: null, error: t.unavailable });
+                return;
+              }
+              refresh();
+            })
+            .catch(function (error) {
+              setSummary({ loading: false, data: null, error: String((error && error.message) || error) });
+            });
         }, []);
 
         var post = function (body) {
@@ -216,10 +241,7 @@ window.__ModuleLoader__.load({
                 return data;
               });
             })
-            .then(function (data) {
-              setSummary({ loading: false, data: data, error: '' });
-              return data;
-            })
+            .then(function (data) { setSummary({ loading: false, data: data, error: '' }); return data; })
             .catch(function (error) {
               setSummary(function (prev) {
                 return { loading: false, data: prev.data, error: String((error && error.message) || error) };
@@ -228,18 +250,14 @@ window.__ModuleLoader__.load({
             });
         };
 
-        // 输入预览：保存前就告诉用户"会存进去什么"，避免把整段说明当授权码存了
         var parsed = draft.trim() ? parseAuthCodeInput(draft) : null;
+        var info = summary.data && summary.data.authCode;
+        var guard = summary.data && summary.data.guard;
+        var audit = summary.data && summary.data.audit;
 
         var onSave = function () {
-          if (!draft.trim()) {
-            setNote(t.emptyErr);
-            return;
-          }
-          if (parsed && !parsed.ok) {
-            setNote(t.invalid);
-            return;
-          }
+          if (!draft.trim()) { setNote(t.emptyErr); return; }
+          if (parsed && !parsed.ok) { setNote(t.invalid); return; }
           setBusy('auth');
           setNote('');
           post({ authCode: draft }).then(function (data) {
@@ -249,7 +267,6 @@ window.__ModuleLoader__.load({
             setNote((data.notes && data.notes[0]) || '');
           });
         };
-
         var onClear = function () {
           setBusy('auth');
           setNote('');
@@ -260,38 +277,34 @@ window.__ModuleLoader__.load({
             setNote((data.notes && data.notes[0]) || '');
           });
         };
-
-        var onToggleGuard = function () {
-          var next = !(summary.data && summary.data.guard && summary.data.guard.enabled);
+        var onToggleGuard = function (next) {
           setBusy('guard');
           setNote('');
-          post({ guardEnabled: next }).then(function () {
-            setBusy('');
-          });
+          post({ guardEnabled: next }).then(function () { setBusy(''); });
         };
-
-        var info = summary.data && summary.data.authCode;
-        var guard = summary.data && summary.data.guard;
 
         var row = function (children, extra) {
           return h(
             'div',
-            { style: Object.assign({ display: 'flex', alignItems: 'center', gap: '8px' }, extra || {}) },
+            { style: Object.assign({ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }, extra || {}) },
             children
           );
+        };
+        var muted = function (text, extra) {
+          return h('div', { style: Object.assign({ fontSize: '12px', lineHeight: '1.7', color: V.sub }, extra || {}) }, text);
+        };
+        var heading = function (text) {
+          return h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, text);
         };
 
         var statusDot = h('span', {
           style: {
-            width: '8px',
-            height: '8px',
-            borderRadius: '50%',
-            flex: 'none',
-            background: info && info.configured ? '#3ba55d' : V.danger
+            width: '8px', height: '8px', borderRadius: '50%', flex: 'none',
+            background: info && info.configured ? V.ok : V.danger
           }
         });
 
-        var input = h('input', {
+        var input = h(Input, {
           type: 'text',
           value: draft,
           placeholder: t.placeholder,
@@ -300,89 +313,37 @@ window.__ModuleLoader__.load({
           disabled: busy === 'auth',
           onChange: function (event) { setDraft(event.target.value); },
           onKeyDown: function (event) { if (event.key === 'Enter') onSave(); },
-          style: {
-            flex: '1 1 auto',
-            minWidth: '0',
-            padding: '6px 8px',
-            fontSize: '13px',
-            fontFamily: 'inherit',
-            color: V.label,
-            background: V.bg,
-            border: '1px solid ' + V.border,
-            borderRadius: '6px',
-            outline: 'none'
-          }
+          style: { flex: '1 1 220px', minWidth: '0' }
         });
-
-        var btn = function (label, onClick, opts) {
-          var o = opts || {};
-          return h(
-            'button',
-            {
-              type: 'button',
-              onClick: onClick,
-              disabled: Boolean(busy) || Boolean(o.disabled),
-              style: {
-                flex: 'none',
-                padding: '6px 12px',
-                fontSize: '13px',
-                fontFamily: 'inherit',
-                cursor: busy ? 'default' : 'pointer',
-                borderRadius: '6px',
-                border: o.primary ? '1px solid transparent' : '1px solid ' + V.border,
-                background: o.primary ? V.accent : 'transparent',
-                color: o.primary ? '#fff' : V.label,
-                opacity: busy || o.disabled ? 0.6 : 1
-              }
-            },
-            label
-          );
-        };
 
         var preview = null;
         if (parsed && parsed.ok) {
-          preview = h(
-            'div',
-            { style: { marginTop: '6px', fontSize: '12px', color: V.sub } },
-            (parsed.shape === 'command' ? t.willExtract : t.bareOk) + maskAuthCode(parsed.code)
-          );
+          preview = muted((parsed.shape === 'command' ? t.willExtract : t.bareOk) + maskAuthCode(parsed.code), { marginTop: '6px' });
         } else if (parsed && !parsed.ok) {
           preview = h('div', { style: { marginTop: '6px', fontSize: '12px', color: V.danger } }, t.invalid);
         }
 
-        // 兜底开关：原生 checkbox 画成开关样式，少依赖一个宿主原语
-        var guardSwitch = h(
-          'button',
-          {
-            type: 'button',
-            role: 'switch',
-            'aria-checked': Boolean(guard && guard.enabled),
-            disabled: busy === 'guard' || !guard,
-            onClick: onToggleGuard,
-            style: {
-              flex: 'none',
-              width: '42px',
-              height: '22px',
-              padding: '2px',
-              cursor: busy === 'guard' || !guard ? 'default' : 'pointer',
-              borderRadius: '11px',
-              border: '1px solid ' + V.border,
-              background: guard && guard.enabled ? V.accent : 'transparent',
-              display: 'flex',
-              justifyContent: guard && guard.enabled ? 'flex-end' : 'flex-start',
-              transition: 'background .14s'
-            }
-          },
-          h('span', {
-            style: {
-              width: '16px',
-              height: '16px',
-              borderRadius: '50%',
-              background: '#fff',
-              boxShadow: '0 1px 2px rgba(0,0,0,.3)'
-            }
-          })
-        );
+        // ---- 兜底战绩：把「原本没推出去、但兜底救回来了」摆出来 ----
+        var debugBody;
+        if (!audit) {
+          debugBody = muted(t.debugNone);
+        } else if (!audit.exists || audit.counts.retryOk + audit.counts.rescueOk === 0) {
+          debugBody = muted(t.debugEmpty);
+        } else {
+          debugBody = h(
+            'div',
+            null,
+            h('div', { style: { fontSize: '12px', fontWeight: 600, marginBottom: '4px' } }, t.debugSummary(audit.counts)),
+            (audit.recent || []).map(function (item, index) {
+              return h(
+                'div',
+                { key: String(index), style: { fontSize: '12px', lineHeight: '1.7', color: V.sub } },
+                '· ' + shortTime(item.at) + '　[' + (item.kind === 'retry-ok' ? t.kindRetry : t.kindRescue) + '] ' +
+                  (item.label || '-') + ' — ' + item.detail
+              );
+            })
+          );
+        }
 
         return h(
           'div',
@@ -392,7 +353,6 @@ window.__ModuleLoader__.load({
               padding: '12px',
               border: '1px solid ' + V.border,
               borderRadius: '12px',
-              color: V.label,
               fontSize: '13px',
               lineHeight: '1.6'
             }
@@ -400,47 +360,75 @@ window.__ModuleLoader__.load({
           h('div', { style: { fontWeight: 600, marginBottom: '10px' } }, t.section),
 
           // ---- 授权码 ----
-          h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, t.authTitle),
+          heading(t.authTitle),
+          row(
+            [
+              statusDot,
+              h(
+                'span',
+                { style: { color: V.sub } },
+                (info && info.configured ? t.configured : t.missing) +
+                  (info && info.configured && info.masked ? ' · ' + info.masked : '')
+              ),
+              info && info.sourceLabel
+                ? h('span', { style: { color: V.sub } }, '· ' + t.source + ': ' + info.sourceLabel)
+                : null
+            ],
+            { marginBottom: '8px' }
+          ),
           row([
-            statusDot,
-            h(
-              'span',
-              { style: { color: V.sub } },
-              (info && info.configured ? t.configured : t.missing) +
-                (info && info.configured && info.masked ? ' · ' + info.masked : '')
-            ),
-            info && info.sourceLabel
-              ? h('span', { style: { color: V.sub } }, '· ' + t.source + ': ' + info.sourceLabel)
-              : null
-          ], { marginBottom: '8px' }),
-
-          row([input, btn(t.save, onSave, { primary: true }), btn(t.clear, onClear, { disabled: !(info && info.configured) })]),
+            input,
+            h(Button, { variant: 'primary', size: 'sm', onClick: onSave, disabled: busy === 'auth' }, t.save),
+            h(Button, { variant: 'outline', size: 'sm', onClick: onClear, disabled: busy === 'auth' || !(info && info.configured) }, t.clear)
+          ]),
           preview,
-          h('div', { style: { marginTop: '8px', fontSize: '12px', color: V.sub } }, t.commandHint),
-          h('div', { style: { marginTop: '4px', fontSize: '12px', color: V.sub } }, t.whereHint),
-
-          note ? h('div', { style: { marginTop: '8px', fontSize: '12px', color: V.accent } }, note) : null,
+          muted(t.commandHint, { marginTop: '8px' }),
+          muted(t.whereHint, { marginTop: '4px' }),
+          note ? h('div', { style: { marginTop: '8px', fontSize: '12px' } }, note) : null,
           summary.error
-            ? h('div', { style: { marginTop: '8px', fontSize: '12px', color: V.danger } },
-                (summary.data ? t.saveFailed : t.loadFailed) + ': ' + summary.error)
+            ? h(
+                'div',
+                { style: { marginTop: '8px', fontSize: '12px', color: V.danger } },
+                (summary.data ? t.saveFailed : t.loadFailed) + ': ' + summary.error
+              )
             : null,
 
-          // ---- 兜底开关 ----
-          h('div', {
-            style: { marginTop: '14px', paddingTop: '12px', borderTop: '1px solid ' + V.border }
-          },
+          // ---- 推送兜底 + 调试图 ----
+          h(
+            'div',
+            { style: { marginTop: '14px', paddingTop: '12px', borderTop: '1px solid ' + V.border } },
             row([
               h('span', { style: { fontWeight: 600 } }, t.guardTitle),
               h('span', { style: { color: V.sub } }, guard && guard.enabled ? t.guardOn : t.guardOff),
-              guardSwitch
+              h(Switch, {
+                checked: Boolean(guard && guard.enabled),
+                onChange: onToggleGuard,
+                label: t.guardTitle,
+                disabled: busy === 'guard' || !guard
+              })
             ]),
-            h('div', { style: { marginTop: '6px', fontSize: '12px', color: V.sub } }, t.guardHint),
-            guard
-              ? h('div', { style: { marginTop: '4px', fontSize: '12px', color: V.sub } },
-                  (pickLang(localeRef) === 'zh'
-                    ? '重试预算：确定未送达 ' + guard.retryCount + ' 次 / 可能已送达 ' + guard.ambiguousRetryCount + ' 次；schedule_id 兜底：' + guard.defaultScheduleId
-                    : 'Retry budget: definitely-undelivered ' + guard.retryCount + ' / possibly-delivered ' + guard.ambiguousRetryCount + '; schedule_id fallback: ' + guard.defaultScheduleId))
-              : null
+            muted(t.guardHint, { marginTop: '6px' }),
+            muted(t.guardWhat, { marginTop: '4px' }),
+            guard ? muted(t.guardBudget(guard), { marginTop: '4px' }) : null,
+
+            h(
+              'div',
+              { style: { marginTop: '10px' } },
+              h(
+                'div',
+                {
+                  role: 'button',
+                  tabIndex: 0,
+                  onClick: function () { setShowDebug(!showDebug); },
+                  onKeyDown: function (event) {
+                    if (event.key === 'Enter' || event.key === ' ') setShowDebug(!showDebug);
+                  },
+                  style: { fontSize: '12px', fontWeight: 600, cursor: 'pointer', userSelect: 'none' }
+                },
+                (showDebug ? '▾ ' : '▸ ') + t.debugTitle
+              ),
+              showDebug ? h('div', { style: { marginTop: '4px' } }, debugBody) : null
+            )
           )
         );
       };
@@ -456,9 +444,7 @@ window.__ModuleLoader__.load({
       ctx.inject(['locale'], function (scope) {
         localeRef.current = scope.locale;
         if (typeof scope.effect === 'function') {
-          scope.effect(function () {
-            return function () { localeRef.current = null; };
-          }, 'hiboard-push: locale handle');
+          scope.effect(function () { return function () { localeRef.current = null; }; }, 'hiboard-push: locale handle');
         }
       });
 
@@ -479,9 +465,16 @@ window.__ModuleLoader__.load({
         console.error('[hiboard-push] settings card skipped: ' + error);
         return;
       }
-      var ConfigCard = Card(react, localeRef);
-      // slots.inject 会等到插槽被声明为止，所以每个宿主只填它有的那个，
-      // 另一个的等待永远不会触发。
+      var ui;
+      try {
+        ui = require('@deepseek-ai/dsh-client-ui-primitives');
+      } catch (error) {
+        // 拿不到原语就不渲染：宁可不显示，也不要退回手搓样式再错一次深浅色
+        console.error('[hiboard-push] settings card skipped (primitives unavailable): ' + error);
+        return;
+      }
+      var ConfigCard = Card(react, ui, localeRef);
+      // slots.inject 会等到插槽被声明为止，所以每个宿主只填它有的那个
       ctx.slots.inject('plugins.bundle.config', function* () {
         yield ctx.slots.register({ name: 'plugins.bundle.config', key: PACKAGE_NAME }, ConfigCard);
       });
@@ -499,7 +492,7 @@ window.__ModuleLoader__.load({
 
     exports.apply = apply;
     // 仅供仓库测试使用，不属于插件契约。
-    exports.__card = { parseAuthCodeInput: parseAuthCodeInput, maskAuthCode: maskAuthCode, TEXT: TEXT };
+    exports.__card = { parseAuthCodeInput: parseAuthCodeInput, maskAuthCode: maskAuthCode, TEXT: TEXT, shortTime: shortTime };
     // slots 与 locale 都是可选的，各自走 scoped inject，所以这里不声明依赖。
     exports.inject = [];
     return module.exports;

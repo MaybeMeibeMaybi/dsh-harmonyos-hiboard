@@ -28,6 +28,9 @@
  * Node built-in `fetch`.
  */
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
 import { maskAuthCode, parseAuthCodeInput } from "./authcode.js";
@@ -61,6 +64,15 @@ const WIRE_SOURCE = "OpenClaw";
 
 /** Environment fallback for the authCode. */
 const AUTH_CODE_ENV = "DSH_HIBOARD_AUTH_CODE";
+
+/**
+ * 兜底的审计/状态目录。**在这里算一次并显式传给兜底**，而不是两边各写一份默认值 ——
+ * 设置页要读同一个目录来统计「原本失败、但兜底救回来」的次数，路径必须唯一。
+ */
+const GUARD_STATE_DIR = join(homedir(), ".dsh", "lan", "push-guard");
+
+/** 调试图最多回溯多少条审计（文件本身有大小上限，读全量没必要）。 */
+const AUDIT_MAX_LINES = 4000;
 
 /** Success codes accepted by the official client (string or numeric zero). */
 const SUCCESS_CODES = new Set(["0000000000", "0"]);
@@ -424,6 +436,63 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
 		env: `环境变量 ${AUTH_CODE_ENV}`,
 		none: "未配置"
 	};
+	/**
+	 * 调试图的数据源：读兜底的审计流水，统计**「原本没推出去、但兜底救回来了」**的次数，
+	 * 并列出最近几次。这正是兜底存在的意义 —— 不列出来，用户只能靠猜它到底干没干活。
+	 *
+	 * 两类算「救回来」：
+	 *   retry-ok   工具真的调用了但失败，按错误类别重试后成功（L3）
+	 *   rescue-ok  根本没调用工具（写成纯文本 / 只承诺没做），兜底代为补推（L1 / L2）
+	 */
+	const auditSummary = () => {
+		const file = join(GUARD_STATE_DIR, "audit.jsonl");
+		const empty = { file, exists: false, counts: { retryOk: 0, rescueOk: 0, failed: 0 }, recent: [] };
+		let text;
+		try {
+			text = readFileSync(file, "utf8");
+		} catch {
+			// 还没跑过任何一轮：这是正常状态，不是错误
+			return empty;
+		}
+		const lines = text.split("\n").filter(Boolean).slice(-AUDIT_MAX_LINES);
+		const counts = { retryOk: 0, rescueOk: 0, failed: 0 };
+		const recent = [];
+		for (const line of lines) {
+			let row;
+			try {
+				row = JSON.parse(line);
+			} catch {
+				// 半行（正在写）或坏行：跳过。一条坏记录不该毁掉整块面板。
+				continue;
+			}
+			if (row?.kind === "retry-ok") {
+				counts.retryOk += 1;
+				recent.push({
+					// kind 必须带上：客户端靠它决定显示「重试」还是「补推」
+					kind: "retry-ok",
+					at: row.at ?? "",
+					level: "",
+					label: row.taskName ?? "",
+					detail: `首次失败后重试第 ${row.tries ?? "?"} 次成功`
+				});
+			} else if (row?.kind === "rescue-ok") {
+				counts.rescueOk += 1;
+				recent.push({
+					kind: "rescue-ok",
+					at: row.at ?? "",
+					level: row.level ?? "",
+					label: row.name ?? "",
+					detail: row.level === "L1" ? "模型把调用写成了纯文本" : "模型承诺了推送却没调用工具"
+				});
+			} else if (row?.kind === "push-failed" || row?.kind === "rescue-failed" || row?.kind === "rescue-error") {
+				counts.failed += 1;
+			}
+		}
+		// 文件是追加写的，末尾最新；面板要「最近几次」，所以倒序后取前几条
+		recent.reverse();
+		return { file, exists: true, counts, recent: recent.slice(0, 5) };
+	};
+
 	const summary = () => {
 		const info = authCodeInfo();
 		const s = settings();
@@ -444,7 +513,9 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
 				defaultScheduleId: s.defaultScheduleId
 			},
 			endpoint: s.pushServiceUrl,
-			storeFile
+			storeFile,
+			// 调试图：兜底到底把多少次「原本失败的推送」救了回来
+			audit: auditSummary()
 		};
 	};
 
@@ -599,6 +670,8 @@ function apply(ctx, rawConfig) {
 		maxContentLength: settings().maxContentLength,
 		defaultResult: settings().defaultResult,
 		defaultScheduleId: settings().defaultScheduleId,
+		// 与设置页的调试图读同一个目录，路径只此一处定义
+		stateDir: GUARD_STATE_DIR,
 		source: settings().source
 	});
 
