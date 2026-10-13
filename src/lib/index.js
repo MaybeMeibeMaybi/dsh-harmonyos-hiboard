@@ -34,6 +34,7 @@ import { join } from "node:path";
 import { defineTool } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
 import { maskAuthCode, parseAuthCodeInput } from "./authcode.js";
+import { ensureRule, removeRule, ruleStatus } from "./agents-rule.js";
 import { configPath, readStore, writeStore } from "./config-store.js";
 import { apply as applyPushGuard } from "./push-guard.js";
 
@@ -73,6 +74,22 @@ const GUARD_STATE_DIR = join(homedir(), ".dsh", "lan", "push-guard");
 
 /** 调试图最多回溯多少条审计（文件本身有大小上限，读全量没必要）。 */
 const AUDIT_MAX_LINES = 4000;
+
+/**
+ * dsh 的全局指令文件。`dsh-agent-instructions` 每个会话都加载它 ——
+ * 而且**只认这一个全局文件**：`.local` 叠加（`AGENTS.local.md`）只在**项目目录**的
+ * 祖先链里生效，全局那段代码写死了只探测 `AGENTS.md`。所以「每轮都推」这条规则
+ * 想对所有会话、所有项目生效，只能写在这里。
+ */
+const AGENTS_FILE = join(process.env.DSH_HOME || join(homedir(), ".dsh"), "AGENTS.md");
+
+/** 规则写入的结果 → 卡片上的提示语。 */
+const RULE_NOTE = {
+	added: "已把「每轮都要推送」写进全局指令文件 AGENTS.md，新会话即生效。",
+	updated: "已更新 AGENTS.md 里的推送规则。",
+	unchanged: "AGENTS.md 里的推送规则已是最新。",
+	"skipped-custom": "检测到你已手写过推送规则，未改动 AGENTS.md。"
+};
 
 /** Success codes accepted by the official client (string or numeric zero). */
 const SUCCESS_CODES = new Set(["0000000000", "0"]);
@@ -118,7 +135,14 @@ const Config = z.object({
 	/** hiboard_push 没带有效 schedule_id 时自动补的值（为空则卡片点不开）。 */
 	defaultScheduleId: z.string().default("dsh_worklog"),
 	/** 设置页路由开关；关掉后 `/hiboard-push/config` 不注册，浏览器半边也停手。 */
-	settingsCard: z.boolean().default(true)
+	settingsCard: z.boolean().default(true),
+	/**
+	 * 保存授权码时，是否顺带把「每轮都要推送」的规则写进全局指令文件
+	 * （`$DSH_HOME/AGENTS.md` 里的一个标记块）。**默认开启** —— 这样一键安装后
+	 * 只要粘一次授权码，规则就自动就位，不必再手改 AGENTS.md。
+	 * 关掉它（卡片上的按钮）会把已写入的那一段一起移除。
+	 */
+	autoRule: z.boolean().default(true)
 });
 
 const entryDefaults = {
@@ -136,7 +160,8 @@ const entryDefaults = {
 	guardAmbiguousRetryCount: 1,
 	guardRetryDelayMs: 3000,
 	defaultScheduleId: "dsh_worklog",
-	settingsCard: true
+	settingsCard: true,
+	autoRule: true
 };
 
 // ---------------------------------------------------------------- payload
@@ -534,7 +559,9 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
 			endpoint: s.pushServiceUrl,
 			storeFile,
 			// 调试图：兜底到底把多少次「原本失败的推送」救了回来
-			audit: auditSummary()
+			audit: auditSummary(),
+			// 常驻规则：是否开启、有没有已写入的块、有没有用户自己写的等价规则
+			rule: Object.assign(ruleStatus(AGENTS_FILE), { enabled: s.autoRule })
 		};
 	};
 
@@ -574,6 +601,10 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
 				const body = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 				const patch = {};
 				const notes = [];
+				/** 本次请求是否真的写入了授权码（清除不算）——用它触发"顺带写规则"。 */
+				let authCodeTouched = false;
+				/** 卡片上的规则开关：true 写入 / false 移除 / undefined 不表态。 */
+				let ruleRequest;
 
 				// ---- 授权码：完整指令或裸码都行；空串表示"清除覆盖" ----
 				if (Object.prototype.hasOwnProperty.call(body, "authCode")) {
@@ -589,8 +620,15 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
 							return;
 						}
 						patch.authCode = parsed.code;
+						authCodeTouched = true;
 						notes.push(`${parsed.note}（${maskAuthCode(parsed.code)}）`);
 					}
+				}
+
+				// ---- 常驻规则开关 ----
+				if (Object.prototype.hasOwnProperty.call(body, "ruleEnabled")) {
+					patch.autoRule = body.ruleEnabled === true;
+					ruleRequest = body.ruleEnabled === true;
 				}
 
 				// ---- 兜底开关：布尔直接落盘，立即生效 ----
@@ -607,6 +645,27 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
 					return;
 				}
 				writeStore(patch, storeFile);
+
+				// ---- 常规规则动作：放在落盘之后，读到的才是"最终"的 autoRule ----
+				// 保存授权码时**顺带**把「每轮都要推送」写进全局指令文件：用户此刻的意图
+				// 就是"让它开始工作"，不该再要求他手改 AGENTS.md。默认开启，卡片可关。
+				try {
+					if (ruleRequest === false) {
+						const r = removeRule(AGENTS_FILE);
+						notes.push(r.action === "removed" ? "已移除全局指令文件里的推送规则。" : "全局推送规则本来就不存在，未改动。");
+					} else if (ruleRequest === true) {
+						const r = ensureRule(AGENTS_FILE);
+						notes.push(RULE_NOTE[r.action] ?? "已同步全局推送规则。");
+					} else if (authCodeTouched && settings().autoRule) {
+						const r = ensureRule(AGENTS_FILE);
+						// unchanged 不提示：每次保存都重复一句"已是最新"只是噪音
+						if (r.action !== "unchanged") notes.push(RULE_NOTE[r.action] ?? "已同步全局推送规则。");
+					}
+				} catch (error) {
+					// 规则写不进去不该让"授权码已保存"这件事看起来失败
+					notes.push(`授权码已保存，但写入全局规则失败：${String(error?.message ?? error)}`);
+				}
+
 				send(200, { ...summary(), notes });
 			} catch (error) {
 				send(400, { error: String(error?.message ?? error) });
@@ -645,7 +704,8 @@ function apply(ctx, rawConfig) {
 			guardAmbiguousRetryCount: Number(resolved.guardAmbiguousRetryCount) >= 0 ? Number(resolved.guardAmbiguousRetryCount) : 1,
 			guardRetryDelayMs: Number(resolved.guardRetryDelayMs) > 0 ? Number(resolved.guardRetryDelayMs) : 3000,
 			defaultScheduleId: String(resolved.defaultScheduleId ?? "").trim() || "dsh_worklog",
-			settingsCard: resolved.settingsCard !== false
+			settingsCard: resolved.settingsCard !== false,
+			autoRule: resolved.autoRule !== false
 		};
 	};
 
