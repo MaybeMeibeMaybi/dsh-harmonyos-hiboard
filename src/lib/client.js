@@ -95,12 +95,19 @@ window.__ModuleLoader__.load({
         guardBudget: function (g) {
           return '重试预算：确定未送达 ' + g.retryCount + ' 次 / 可能已送达 ' + g.ambiguousRetryCount + ' 次　·　schedule_id 兜底：' + g.defaultScheduleId;
         },
-        ruleTitle: '常驻推送规则',
+        ruleTitle: '每轮对话推送',
         ruleOn: '已启用',
         ruleOff: '未启用',
         ruleHint: '保存授权码时，会自动把「每轮都要推送」写进全局指令文件 AGENTS.md（带标记、可随时移除），新会话即生效。',
         ruleCustom: '检测到你已手写过推送规则 —— 插件不会改动你的 AGENTS.md。',
         ruleBlockPresent: 'AGENTS.md 里已有本插件维护的规则段（带标记；关掉即可移除）。',
+        sourceTitle: '推送源名称',
+        sourceCurrent: function (v) {
+          return '当前生效：' + v;
+        },
+        sourcePlaceholder: 'DeepSeek Harness',
+        sourceHint: '负一屏卡片上显示的「来源 / AI 工具名」。改这里，本机所有推送（含启动卡片）会一起改用同一个名称。输入框留空并保存即恢复默认。',
+        sourceReset: '恢复默认',
         debugTitle: '兜底战绩',
         debugSummary: function (c) {
           return '已救回 ' + (c.retryOk + c.rescueOk) + ' 次（重试 ' + c.retryOk + ' · 补推 ' + c.rescueOk + '）';
@@ -144,12 +151,19 @@ window.__ModuleLoader__.load({
         guardBudget: function (g) {
           return 'Retry budget: definitely-undelivered ' + g.retryCount + ' / possibly-delivered ' + g.ambiguousRetryCount + '　·　schedule_id fallback: ' + g.defaultScheduleId;
         },
-        ruleTitle: 'Always-push rule',
+        ruleTitle: 'Push every turn',
         ruleOn: 'enabled',
         ruleOff: 'disabled',
         ruleHint: 'Saving the authCode also writes an "every turn must push" rule into your global instruction file AGENTS.md (marker-delimited, removable); new sessions pick it up.',
         ruleCustom: 'You already wrote a push rule by hand, so this plugin leaves AGENTS.md untouched.',
         ruleBlockPresent: "AGENTS.md already carries this plugin's rule block (marker-delimited; switch this off to remove it).",
+        sourceTitle: 'Push source name',
+        sourceCurrent: function (v) {
+          return 'Currently: ' + v;
+        },
+        sourcePlaceholder: 'DeepSeek Harness',
+        sourceHint: 'The brand / AI tool name shown on the card. Changing it moves every push on this machine (including the startup card) to the same name. Save an empty value to restore the default.',
+        sourceReset: 'Reset',
         debugTitle: 'Rescues so far',
         debugSummary: function (c) {
           return 'Saved ' + (c.retryOk + c.rescueOk) + ' (retries ' + c.retryOk + ', pushes ' + c.rescueOk + ')';
@@ -300,6 +314,26 @@ window.__ModuleLoader__.load({
             setNote((data.notes && data.notes[0]) || '');
           });
         };
+        var sourceState = useState('');
+        var sourceDraft = sourceState[0];
+        var setSourceDraft = sourceState[1];
+        var onSaveSource = function () {
+          setBusy('source');
+          setNote('');
+          post({ source: sourceDraft }).then(function (data) {
+            setBusy('');
+            if (data && data.notes && data.notes[0]) setNote(data.notes[0]);
+          });
+        };
+        var onResetSource = function () {
+          setSourceDraft('');
+          setBusy('source');
+          setNote('');
+          post({ source: '' }).then(function (data) {
+            setBusy('');
+            if (data && data.notes && data.notes[0]) setNote(data.notes[0]);
+          });
+        };
         var onToggleRule = function (next) {
           setBusy('rule');
           setNote('');
@@ -344,7 +378,7 @@ window.__ModuleLoader__.load({
           disabled: busy === 'auth',
           onChange: function (event) { setDraft(event.target.value); },
           onKeyDown: function (event) { if (event.key === 'Enter') onSave(); },
-          style: { flex: '1 1 220px', minWidth: '0' }
+          style: { flex: '1 1 300px', minWidth: '300px' }
         });
 
         var preview = null;
@@ -446,6 +480,60 @@ window.__ModuleLoader__.load({
               )
             : null,
 
+          // ---- 每轮对话推送（保存授权码时自动写进全局指令文件）----
+          h(
+            'div',
+            { style: { marginTop: '14px', paddingTop: '12px', borderTop: '1px solid ' + V.border } },
+            row([
+              h('span', { style: { fontWeight: 600 } }, t.ruleTitle),
+              h('span', { style: { color: V.sub } }, rule && rule.enabled ? t.ruleOn : t.ruleOff),
+              h(Switch, {
+                checked: Boolean(rule && rule.enabled),
+                onChange: onToggleRule,
+                label: t.ruleTitle,
+                disabled: busy === 'rule' || !rule
+              })
+            ]),
+            muted(
+              rule && rule.customRule ? t.ruleCustom : rule && rule.block ? t.ruleBlockPresent : t.ruleHint,
+              { marginTop: '6px' }
+            )
+          ),
+
+          // ---- 推送源名称：改一处，本机所有推送一起改 ----
+          h(
+            'div',
+            { style: { marginTop: '14px', paddingTop: '12px', borderTop: '1px solid ' + V.border } },
+            row([
+              h('span', { style: { fontWeight: 600 } }, t.sourceTitle),
+              h(
+                'span',
+                { style: { color: V.sub } },
+                t.sourceCurrent(String((summary.data && summary.data.source) || t.sourcePlaceholder))
+              )
+            ]),
+            h(
+              'div',
+              { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center', marginTop: '6px' } },
+              [
+                h(Input, {
+                  type: 'text',
+                  value: sourceDraft,
+                  placeholder: t.sourcePlaceholder,
+                  spellCheck: false,
+                  autoComplete: 'off',
+                  disabled: busy === 'source',
+                  onChange: function (event) { setSourceDraft(event.target.value); },
+                  onKeyDown: function (event) { if (event.key === 'Enter') onSaveSource(); },
+                  style: { flex: '1 1 300px', minWidth: '300px' }
+                }),
+                h(Button, { variant: 'primary', size: 'sm', onClick: onSaveSource, disabled: busy === 'source' }, t.save),
+                h(Button, { variant: 'ghost', size: 'sm', onClick: onResetSource, disabled: busy === 'source' }, t.sourceReset)
+              ]
+            ),
+            muted(t.sourceHint, { marginTop: '6px' })
+          ),
+
           // ---- 推送兜底 + 调试图 ----
           h(
             'div',
@@ -483,26 +571,6 @@ window.__ModuleLoader__.load({
               showDebug ? h('div', { style: { marginTop: '4px' } }, debugBody) : null
             )
           ),
-
-          // ---- 常驻推送规则：保存授权码时自动写进全局指令文件 ----
-          h(
-            'div',
-            { style: { marginTop: '14px', paddingTop: '12px', borderTop: '1px solid ' + V.border } },
-            row([
-              h('span', { style: { fontWeight: 600 } }, t.ruleTitle),
-              h('span', { style: { color: V.sub } }, rule && rule.enabled ? t.ruleOn : t.ruleOff),
-              h(Switch, {
-                checked: Boolean(rule && rule.enabled),
-                onChange: onToggleRule,
-                label: t.ruleTitle,
-                disabled: busy === 'rule' || !rule
-              })
-            ]),
-            muted(
-              rule && rule.customRule ? t.ruleCustom : rule && rule.block ? t.ruleBlockPresent : t.ruleHint,
-              { marginTop: '6px' }
-            )
-          )
         );
       };
     }

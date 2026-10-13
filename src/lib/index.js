@@ -61,7 +61,19 @@ const DEFAULT_RESULT = "任务已完成";
  * name); the platform accepts other values, but rendering is platform-defined,
  * so check a real card after changing it.
  */
-const WIRE_SOURCE = "OpenClaw";
+/**
+ * The HIBoard contract brands cards by this value — the phone renders it as the
+ * card's brand / tool name. It defaults to `"DeepSeek Harness"` (this project's
+ * branding; the official today-task skill and hwpush send `"OpenClaw"` for the
+ * same field, and the platform accepts either — rendering of a custom value is
+ * platform-defined, so look at a real card after changing it).
+ *
+ * Overridable via the `source` config option, which the settings card exposes as
+ * 「推送源名称」. Other local pushers (e.g. the startup/token card in
+ * `dsh-token-broadcast`) read this same value from the plugin's config file, so
+ * one edit moves the whole machine to one brand.
+ */
+const WIRE_SOURCE = "DeepSeek Harness";
 
 /** Environment fallback for the authCode. */
 const AUTH_CODE_ENV = "DSH_HIBOARD_AUTH_CODE";
@@ -454,7 +466,7 @@ function hiboardVerifyTool({ resolveAuthCode, settings }) {
  * 不继承 dsh Connection 的登录认证，本插件也不自己做 Host / Origin 策略。
  * 部署时鉴权必须同时覆盖本路由与 dsh 本身；不想暴露就把 settingsCard 设为 false。
  */
-function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
+function buildConfigRoute({ authCodeInfo, settings, storeFile, selfcheckReport }) {
 	const SOURCE_LABEL = {
 		settings: "设置页（本插件配置）",
 		entry: "profile 补丁层 hiboard-push.config.authCode",
@@ -557,6 +569,10 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
 				defaultScheduleId: s.defaultScheduleId
 			},
 			endpoint: s.pushServiceUrl,
+			// 推送源名称：卡片上显示的"来源 / AI 工具名"
+			source: s.source,
+			// 自检工具是否真的注册上了（失败会被回显，不再静默）
+			selfcheck: selfcheckReport(),
 			storeFile,
 			// 调试图：兜底到底把多少次「原本失败的推送」救了回来
 			audit: auditSummary(),
@@ -638,6 +654,13 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
 				if (Object.prototype.hasOwnProperty.call(body, "defaultScheduleId")) {
 					const text = String(body.defaultScheduleId ?? "").trim();
 					patch.defaultScheduleId = text || null;
+				}
+				// ---- 推送源名称（source）：卡片上显示的"来源 / AI 工具名" ----
+				// 空串 → 清除覆盖，回退到默认 "DeepSeek Harness"
+				if (Object.prototype.hasOwnProperty.call(body, "source")) {
+					const text = String(body.source ?? "").trim();
+					patch.source = text || null;
+					notes.push(text ? `推送源名称已改为「${text}」，本机所有推送都会用它。` : "已恢复默认推送源名称（DeepSeek Harness）。");
 				}
 
 				if (Object.keys(patch).length === 0) {
@@ -730,8 +753,13 @@ function apply(ctx, rawConfig) {
 	ctx.tools.register(hiboardPushTool({ resolveAuthCode, settings }));
 	ctx.tools.register(hiboardVerifyTool({ resolveAuthCode, settings }));
 
+	/** 自检工具的注册结果，由兜底回调写入（见下面的 selfcheckReport）。 */
+	let selfcheckStatus = { ok: null, error: "" };
+
 	// ---- 推送兜底（原 dsh-push-guard，现并入本包）：默认开启，可实时关闭 ----
 	applyPushGuard(ctx, {
+		// 注册成败都要回显：失败原本只写了一条**看不见的** warn
+		onSelfcheckRegister: (result) => { selfcheckStatus = result; },
 		// 静态值：只有把 guardEnabled:false 写死在配置里，才会整个不加载
 		enabled: entry.guardEnabled !== false,
 		// 实时值：每次判定都重新读，设置页一关就立即停
@@ -745,6 +773,8 @@ function apply(ctx, rawConfig) {
 		// 让兜底走"实时解析"而不是把挂载时的值钉死，
 		// 否则设置页里新存的授权码要等重启才对兜底生效。
 		resolveAuthCode,
+		// 同理实时解析：设置页改了「推送源名称」，兜底补推的卡片也要立刻跟着变
+		resolveSource: () => settings().source,
 		pushServiceUrl: settings().pushServiceUrl,
 		maxContentLength: settings().maxContentLength,
 		defaultResult: settings().defaultResult,
@@ -754,12 +784,23 @@ function apply(ctx, rawConfig) {
 		source: settings().source
 	});
 
+	/**
+	 * 自检工具的注册状态（**回显给设置页**）。
+	 * `registered` 取实时查询 —— 即便注册被延迟或撤下也能如实反映；
+	 * `error` 是注册时捕获到的原因。没有它，注册失败就只剩一条无处可见的 warn：
+	 * 本机 `~/.dsh/logs` 下没有该进程的日志文件（2026-10-13 验收报告第 5 节）。
+	 */
+	const selfcheckReport = () => ({
+		registered: Boolean(ctx.tools?.get?.("hiboard_push_selfcheck")),
+		error: selfcheckStatus.error || ""
+	});
+
 	// ---- 设置页路由 ----
 	// webServer 只在 web profile 存在，而 cordis 没有"可选注入"的写法，
 	// 所以走一次 scoped inject：服务不在时闭包根本不执行，插件照常加载。
 	if (settings().settingsCard && typeof ctx.inject === "function") {
 		ctx.inject(["webServer"], (scope) => {
-			const route = buildConfigRoute({ authCodeInfo, settings, storeFile });
+			const route = buildConfigRoute({ authCodeInfo, settings, storeFile, selfcheckReport });
 			// 挂在 effect 上：插件被关掉时路由一起撤下，否则它会继续为一个
 			// 已关闭的插件读写配置（modsearch 踩过这个坑，见其 dsh/index.js 注释）。
 			scope.effect(() => scope.webServer.register(route), "hiboard-push: settings route");

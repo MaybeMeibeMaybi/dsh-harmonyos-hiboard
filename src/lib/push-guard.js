@@ -83,7 +83,7 @@ const DEFAULTS = {
 	retryCount: 3,
 	ambiguousRetryCount: 1,
 	defaultResult: "任务已完成",
-	source: "OpenClaw",
+	source: "DeepSeek Harness",
 	defaultScheduleId: "dsh_worklog",
 	stateDir: "",
 	minPromiseLength: 120,
@@ -123,7 +123,8 @@ export const Config = z.object({
 	defaultResult: z.string().default(DEFAULTS.defaultResult),
 	/**
 	 * 卡片 `source` 字段 —— 就是负一屏上那个**来源 / AI 工具名**的品牌化渲染值。
-	 * 默认 `"OpenClaw"`：与官方 `today-task` skill、`hwpush` 以及本插件历史行为一致。
+	 * 默认 `"DeepSeek Harness"`（本项目品牌）。官方 `today-task` skill 与 `hwpush` 在同一
+	 * 字段上发的是 `"OpenClaw"`，平台两者都接受。可在设置卡片「推送源名称」里改。
 	 * 实测平台**接受**任意值（自定义值同样返回 `0000000000`），但渲染样式由平台决定，
 	 * 换值后请先在真机上看一眼卡片再长期使用。
 	 */
@@ -488,7 +489,13 @@ export function apply(ctx, config) {
 		).trim();
 	const pushUrl = String(settings.pushServiceUrl || DEFAULTS.pushServiceUrl);
 	const maxLen = Number(settings.maxContentLength) > 0 ? Number(settings.maxContentLength) : DEFAULTS.maxContentLength;
-	const cardSource = String(settings.source ?? "").trim() || DEFAULTS.source;
+	/**
+	 * 卡片来源（负一屏上的"来源 / AI 工具名"）**实时解析**：设置页改一次，
+	 * 之后**所有**卡片（含兜底补推的那张）都用新值，而不是钉在挂载那一刻。
+	 */
+	const resolveCardSource = () =>
+		String((typeof settings.resolveSource === "function" ? settings.resolveSource() : settings.source) ?? "").trim() ||
+		DEFAULTS.source;
 	const retryBudget = Math.max(0, Number(settings.retryCount) >= 0 ? Number(settings.retryCount) : DEFAULTS.retryCount);
 	const ambiguousBudget = Math.max(0, Number(settings.ambiguousRetryCount) >= 0 ? Number(settings.ambiguousRetryCount) : DEFAULTS.ambiguousRetryCount);
 	const stateDir = String(settings.stateDir || "").trim() || join(homedir(), ".dsh", "lan", "push-guard");
@@ -514,7 +521,7 @@ export function apply(ctx, config) {
 		retryEnabled: settings.retryEnabled !== false,
 		retryCount: retryBudget,
 		ambiguousRetryCount: ambiguousBudget,
-		source: cardSource,
+		source: resolveCardSource(),
 		defaultScheduleId: String(settings.defaultScheduleId || DEFAULTS.defaultScheduleId),
 		stateDir
 	};
@@ -522,7 +529,7 @@ export function apply(ctx, config) {
 	ctx.logger?.info?.(
 		"[push-guard] 启动自检：authCode=%s；L1 抢救=%s，L2 承诺兜底=%s，L3 重试=%s（确定未送达 %d 次 / 可能已送达 %d 次）；卡片来源=%s；schedule_id 兜底=%s；状态目录=%s",
 		startup.authCode, startup.rescueEnabled, startup.promiseRescueEnabled, startup.retryEnabled,
-		retryBudget, ambiguousBudget, cardSource, startup.defaultScheduleId, stateDir
+		retryBudget, ambiguousBudget, resolveCardSource(), startup.defaultScheduleId, stateDir
 	);
 	if (startup.authCode === "MISSING") {
 		ctx.logger?.warn?.("[push-guard] ⚠️ 未配置 authCode，任何兜底推送都会失败（请检查 hiboard-push / push-guard 配置）");
@@ -618,7 +625,7 @@ export function apply(ctx, config) {
 						// 兜底卡片同样必须是"能点开"的：schedule_id 为空时用默认分组
 						defaultScheduleId: String(settings.defaultScheduleId || DEFAULTS.defaultScheduleId),
 						// 兜底卡片与正常卡片用同一个来源名（负一屏上显示的 AI 工具名）
-						source: cardSource,
+						source: resolveCardSource(),
 						stateDir,
 						audit
 					});
@@ -776,16 +783,26 @@ export function apply(ctx, config) {
 					schema: {
 						type: "object",
 						additionalProperties: false,
+						// ⚠️ `required` 必须写在**对象层**，不能写进每个属性节点。
+						// 本工具没有走 defineTool()（那个会把 DSL 编译掉），而是把裸对象直接
+						// 交给 ctx.tools.register()，于是要过 dsh-tools 的
+						// assertSupportedJsonSchema —— 它只允许 required 出现在 type:"object" 上。
+						// 写成属性级 `required: true` 会抛 JsonSchemaError，而被下面的 catch 吞掉，
+						// 表现为"自检工具根本不存在"且毫无提示（2026-10-13 验收实测）。
+						required: [
+							"guardActive", "hooked", "authCode", "source", "retryBudget",
+							"endpoint", "endpointReachable", "lastState", "auditTail"
+						],
 						properties: {
-							guardActive: { type: "boolean", required: true },
-							hooked: { type: "boolean", required: true },
-							authCode: { type: "string", required: true },
-							source: { type: "string", required: true },
-							retryBudget: { type: "string", required: true },
-							endpoint: { type: "string", required: true },
-							endpointReachable: { type: "boolean", required: true },
-							lastState: { type: "string", required: true },
-							auditTail: { type: "string", required: true }
+							guardActive: { type: "boolean" },
+							hooked: { type: "boolean" },
+							authCode: { type: "string" },
+							source: { type: "string" },
+							retryBudget: { type: "string" },
+							endpoint: { type: "string" },
+							endpointReachable: { type: "boolean" },
+							lastState: { type: "string" },
+							auditTail: { type: "string" }
 						}
 					},
 					render(_args, value) {
@@ -832,7 +849,7 @@ export function apply(ctx, config) {
 						guardActive: !guardOff(),
 						hooked,
 						authCode: resolveAuthCode() ? "已配置" : "未配置（推送会失败）",
-						source: cardSource,
+						source: resolveCardSource(),
 						retryBudget: `确定未送达 ${retryBudget} 次 / 可能已送达 ${ambiguousBudget} 次`,
 						endpoint: pushUrl,
 						endpointReachable: reachable,
@@ -841,10 +858,24 @@ export function apply(ctx, config) {
 					};
 				}
 			});
+			try {
+				settings.onSelfcheckRegister?.({ ok: true, error: "" });
+			} catch {
+				/* 上报失败不影响工具本身 */
+			}
 			return () => off();
 		}, "push-guard: self-check tool");
 	} catch (error) {
-		ctx.logger?.warn?.("[push-guard] 注册自检工具失败（已忽略）：%s", error?.message ?? String(error));
+		const message = String(error?.message ?? error);
+		ctx.logger?.warn?.("[push-guard] 注册自检工具失败：%s", message);
+		// **不再静默**：把失败回显给宿主，设置页会在 /hiboard-push/config 里报
+		// selfcheck.registered=false。本机 ~/.dsh/logs 下没有该进程的日志文件，warn
+		// 是无处可见的 —— 2026-10-13 的验收就是因为这一点完全无感（报告第 5 节）。
+		try {
+			settings.onSelfcheckRegister?.({ ok: false, error: message });
+		} catch {
+			/* 上报失败不该影响其它功能 */
+		}
 	}
 }
 
