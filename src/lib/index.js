@@ -31,7 +31,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { defineTool } from "@deepseek-ai/dsh-tools";
+import { assertObjectJsonSchema, defineTool } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
 import { maskAuthCode, parseAuthCodeInput } from "./authcode.js";
 import { ensureRule, removeRule, ruleStatus } from "./agents-rule.js";
@@ -466,7 +466,7 @@ function hiboardVerifyTool({ resolveAuthCode, settings }) {
  * 不继承 dsh Connection 的登录认证，本插件也不自己做 Host / Origin 策略。
  * 部署时鉴权必须同时覆盖本路由与 dsh 本身；不想暴露就把 settingsCard 设为 false。
  */
-function buildConfigRoute({ authCodeInfo, settings, storeFile, selfcheckReport }) {
+function buildConfigRoute({ authCodeInfo, settings, storeFile, selfcheckReport, toolSchemaReport }) {
 	const SOURCE_LABEL = {
 		settings: "设置页（本插件配置）",
 		entry: "profile 补丁层 hiboard-push.config.authCode",
@@ -573,6 +573,8 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile, selfcheckReport }
 			source: s.source,
 			// 自检工具是否真的注册上了（失败会被回显，不再静默）
 			selfcheck: selfcheckReport(),
+			// 每个工具的入参 schema 是否合法（非法会让整机无法对话，必须能看见）
+			toolSchemas: toolSchemaReport(),
 			storeFile,
 			// 调试图：兜底到底把多少次「原本失败的推送」救了回来
 			audit: auditSummary(),
@@ -795,12 +797,39 @@ function apply(ctx, rawConfig) {
 		error: selfcheckStatus.error || ""
 	});
 
+	/**
+	 * 运行时防线：**每个工具已注册的 `parameters` 是不是合法的对象根 schema**。
+	 *
+	 * 为什么需要它：`ctx.tools.register()` **只校验 `output.schema`**，`parameters` 会被
+	 * 原样透传给模型 API，而 API 要求 `type: "object"`。`{}` 的 type 是 null ——
+	 * 2026-10-13 就是这样让**每一个**请求都被服务端拒绝、整机无法对话的：
+	 *
+	 *   Invalid schema for function 'hiboard_push_selfcheck':
+	 *   schema must be a JSON Schema of 'type: "object"', got 'type: null'.
+	 *
+	 * 本地只有 `assertObjectJsonSchema` 拦得住它（`assertSupportedJsonSchema` 会放过 `{}`）。
+	 * 这里主动验一遍并回显到设置页，同类问题从此不会静默。
+	 */
+	const toolSchemaReport = () => {
+		const bad = [];
+		for (const name of ["hiboard_push", "hiboard_verify", "hiboard_push_selfcheck"]) {
+			const tool = ctx.tools?.get?.(name);
+			if (!tool) continue;
+			try {
+				assertObjectJsonSchema(tool.parameters ?? {});
+			} catch (error) {
+				bad.push({ name, error: String(error?.message ?? error) });
+			}
+		}
+		return { ok: bad.length === 0, bad };
+	};
+
 	// ---- 设置页路由 ----
 	// webServer 只在 web profile 存在，而 cordis 没有"可选注入"的写法，
 	// 所以走一次 scoped inject：服务不在时闭包根本不执行，插件照常加载。
 	if (settings().settingsCard && typeof ctx.inject === "function") {
 		ctx.inject(["webServer"], (scope) => {
-			const route = buildConfigRoute({ authCodeInfo, settings, storeFile, selfcheckReport });
+			const route = buildConfigRoute({ authCodeInfo, settings, storeFile, selfcheckReport, toolSchemaReport });
 			// 挂在 effect 上：插件被关掉时路由一起撤下，否则它会继续为一个
 			// 已关闭的插件读写配置（modsearch 踩过这个坑，见其 dsh/index.js 注释）。
 			scope.effect(() => scope.webServer.register(route), "hiboard-push: settings route");
@@ -814,6 +843,16 @@ function apply(ctx, rawConfig) {
 		settings().pushServiceUrl,
 		settings().guardEnabled ? "ON" : "OFF"
 	);
+
+	// 工具入参 schema 非法会让模型 API 拒绝**每一个**请求（2026-10-13 整机无法对话）。
+	// 启动时就吼一声，别等用户自己发现"dsh 不能用了"。
+	const schemas = toolSchemaReport();
+	if (!schemas.ok) {
+		ctx.logger?.error?.(
+			"[hiboard-push] ❌ 工具入参 schema 非法，模型 API 会拒绝每一个请求，请立即升级插件：%s",
+			schemas.bad.map((b) => `${b.name}: ${b.error}`).join(" | ")
+		);
+	}
 }
 
 export { apply, Config, inject, name };

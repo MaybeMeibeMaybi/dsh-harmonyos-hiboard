@@ -106,7 +106,7 @@ window.__ModuleLoader__.load({
           return '当前生效：' + v;
         },
         sourcePlaceholder: 'DeepSeek Harness',
-        sourceHint: '负一屏卡片上显示的「来源 / AI 工具名」。改这里，本机所有推送（含启动卡片）会一起改用同一个名称。输入框留空并保存即恢复默认。',
+        sourceHint: '负一屏卡片上显示的「来源 / AI 工具名」，输入框留空并保存即恢复默认。',
         sourceReset: '恢复默认',
         debugTitle: '兜底战绩',
         debugSummary: function (c) {
@@ -162,7 +162,7 @@ window.__ModuleLoader__.load({
           return 'Currently: ' + v;
         },
         sourcePlaceholder: 'DeepSeek Harness',
-        sourceHint: 'The brand / AI tool name shown on the card. Changing it moves every push on this machine (including the startup card) to the same name. Save an empty value to restore the default.',
+        sourceHint: 'The brand / AI tool name shown on the card; save an empty value to restore the default.',
         sourceReset: 'Reset',
         debugTitle: 'Rescues so far',
         debugSummary: function (c) {

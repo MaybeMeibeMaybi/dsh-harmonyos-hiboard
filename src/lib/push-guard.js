@@ -70,6 +70,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFil
 import { homedir } from "node:os";
 import { join } from "node:path";
 import z from "@deepseek-ai/schemastery";
+import { SELFCHECK_OUTPUT_SCHEMA, SELFCHECK_PARAMETERS } from "./tool-schemas.js";
 
 export const name = "push-guard";
 /** tools 用来注册自检工具；会话事件走事件总线，不需要额外服务。 */
@@ -778,33 +779,14 @@ export function apply(ctx, config) {
 				name: "hiboard_push_selfcheck",
 				description:
 					"Self-check the HarmonyOS assistant-today (负一屏) push path: reports whether the push-guard plugin is active, whether hiboard_push is hooked for retry, whether an authCode is configured, and probes the HIBoard endpoint. Use it when a push may have failed silently or after changing push config.",
-				parameters: {},
+				// ⚠️ 两个 schema 都抽到 tool-schemas.js 里了 —— 原因见那里的注释：
+				// 这个工具是**裸对象注册**（不走 defineTool），dsh 只校验 output.schema、
+				// `parameters` 原样透传给模型 API，本地没人看着它。2026-10-13 因此出过
+				// 两次事故（属性级 required → 工具静默不存在；parameters:{} → 整机无法对话）。
+				// 抽成纯模块后 test/tool-schemas.test.mjs 能在仓库里直接断言。
+				parameters: SELFCHECK_PARAMETERS,
 				output: {
-					schema: {
-						type: "object",
-						additionalProperties: false,
-						// ⚠️ `required` 必须写在**对象层**，不能写进每个属性节点。
-						// 本工具没有走 defineTool()（那个会把 DSL 编译掉），而是把裸对象直接
-						// 交给 ctx.tools.register()，于是要过 dsh-tools 的
-						// assertSupportedJsonSchema —— 它只允许 required 出现在 type:"object" 上。
-						// 写成属性级 `required: true` 会抛 JsonSchemaError，而被下面的 catch 吞掉，
-						// 表现为"自检工具根本不存在"且毫无提示（2026-10-13 验收实测）。
-						required: [
-							"guardActive", "hooked", "authCode", "source", "retryBudget",
-							"endpoint", "endpointReachable", "lastState", "auditTail"
-						],
-						properties: {
-							guardActive: { type: "boolean" },
-							hooked: { type: "boolean" },
-							authCode: { type: "string" },
-							source: { type: "string" },
-							retryBudget: { type: "string" },
-							endpoint: { type: "string" },
-							endpointReachable: { type: "boolean" },
-							lastState: { type: "string" },
-							auditTail: { type: "string" }
-						}
-					},
+					schema: SELFCHECK_OUTPUT_SCHEMA,
 					render(_args, value) {
 						return [{
 							type: "text",
