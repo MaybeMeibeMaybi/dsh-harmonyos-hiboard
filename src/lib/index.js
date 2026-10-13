@@ -446,7 +446,7 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
 	 */
 	const auditSummary = () => {
 		const file = join(GUARD_STATE_DIR, "audit.jsonl");
-		const empty = { file, exists: false, counts: { retryOk: 0, rescueOk: 0, failed: 0 }, recent: [] };
+		const empty = { file, exists: false, counts: { retryOk: 0, rescueOk: 0, failed: 0, missed: 0 }, recent: [], missedRecent: [] };
 		let text;
 		try {
 			text = readFileSync(file, "utf8");
@@ -455,8 +455,16 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
 			return empty;
 		}
 		const lines = text.split("\n").filter(Boolean).slice(-AUDIT_MAX_LINES);
-		const counts = { retryOk: 0, rescueOk: 0, failed: 0 };
+		const counts = { retryOk: 0, rescueOk: 0, failed: 0, missed: 0 };
 		const recent = [];
+		const missedRecent = [];
+		/** missed 的原因码 → 面板上的说法。 */
+		const MISSED_REASON = {
+			"literal-text-unrescued": "模型把调用写成了纯文本（兜底已关闭，未补推）",
+			"broken-promise-unrescued": "模型承诺了推送却没调用工具（兜底已关闭，未补推）",
+			"failed-retryable-unretried": "调用失败，本可重试（兜底已关闭，未重试）",
+			"failed-permanent": "调用永久失败（兜底不会重试这类错误）"
+		};
 		for (const line of lines) {
 			let row;
 			try {
@@ -484,13 +492,24 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile }) {
 					label: row.name ?? "",
 					detail: row.level === "L1" ? "模型把调用写成了纯文本" : "模型承诺了推送却没调用工具"
 				});
+			} else if (row?.kind === "missed") {
+				// 兜底关闭期间"本该补推 / 本该重试"的记录：这是关掉它的代价，要看得到
+				counts.missed += 1;
+				missedRecent.push({
+					kind: "missed",
+					at: row.at ?? "",
+					level: row.level ?? "",
+					label: row.name ?? "",
+					detail: MISSED_REASON[row.reason] ?? String(row.reason ?? "未推送")
+				});
 			} else if (row?.kind === "push-failed" || row?.kind === "rescue-failed" || row?.kind === "rescue-error") {
 				counts.failed += 1;
 			}
 		}
 		// 文件是追加写的，末尾最新；面板要「最近几次」，所以倒序后取前几条
 		recent.reverse();
-		return { file, exists: true, counts, recent: recent.slice(0, 5) };
+		missedRecent.reverse();
+		return { file, exists: true, counts, recent: recent.slice(0, 5), missedRecent: missedRecent.slice(0, 5) };
 	};
 
 	const summary = () => {

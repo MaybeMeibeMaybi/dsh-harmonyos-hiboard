@@ -1,7 +1,7 @@
 {
   "name": "dsh-harmonyos-hiboard",
-  "version": "0.7.1",
-  "description": "把DSH的任务结果，以服务卡片形式推送到华为鸿蒙负一屏\nPush DSH task results to the Huawei HarmonyOS assistant-today screen as service cards.",
+  "version": "0.7.2",
+  "description": "把DSH的任务结果，以服务卡片形式推送到华为鸿蒙负一屏 ｜ Push DSH task results to the Huawei HarmonyOS assistant-today screen as service cards.",
   "author": "Jim Chen",
   "license": "MIT",
   "repository": {

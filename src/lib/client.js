@@ -101,8 +101,13 @@ window.__ModuleLoader__.load({
         },
         debugEmpty: '还没有需要兜底的记录 —— 每次推送都成功调用了工具。',
         debugNone: '兜底还没有运行记录。',
+        debugMissedSummary: function (c) {
+          return '兜底已关闭 —— 期间漏掉未推送 ' + c.missed + ' 次';
+        },
+        debugMissedEmpty: '兜底关闭期间还没有漏推记录。',
         kindRetry: '重试',
         kindRescue: '补推',
+        kindMissed: '漏推',
         loadFailed: '读取配置失败',
         saveFailed: '保存失败',
         unavailable: '设置路由不可用（宿主未提供）。'
@@ -139,8 +144,13 @@ window.__ModuleLoader__.load({
         },
         debugEmpty: 'Nothing needed rescuing yet — every push called the tool successfully.',
         debugNone: 'The safety net has no run records yet.',
+        debugMissedSummary: function (c) {
+          return 'Safety net is off — ' + c.missed + ' pushes have gone missing since';
+        },
+        debugMissedEmpty: 'Nothing has gone missing while the net was off.',
         kindRetry: 'retry',
         kindRescue: 'rescue',
+        kindMissed: 'missed',
         loadFailed: 'Could not load the configuration',
         saveFailed: 'Could not save',
         unavailable: 'The settings route is unavailable (host did not provide it).'
@@ -323,26 +333,48 @@ window.__ModuleLoader__.load({
           preview = h('div', { style: { marginTop: '6px', fontSize: '12px', color: V.danger } }, t.invalid);
         }
 
-        // ---- 兜底战绩：把「原本没推出去、但兜底救回来了」摆出来 ----
+        // ---- 战绩面板 ----
+        // 兜底**开着**：显示「救回了几次」。
+        // 兜底**关掉**：面板不消失，改显示「漏掉了几张」—— 关掉它的代价要看得见，
+        // 否则用户只会觉得"关了就关了"，直到发现卡片少了几张。
+        var guardOn = Boolean(guard && guard.enabled);
+        var itemRows = function (items, kindOf) {
+          return (items || []).map(function (item, index) {
+            return h(
+              'div',
+              { key: String(index), style: { fontSize: '12px', lineHeight: '1.7', color: V.sub } },
+              '· ' + shortTime(item.at) + '　[' + kindOf(item) + '] ' + (item.label || '-') + ' — ' + item.detail
+            );
+          });
+        };
+        var boldLine = function (text) {
+          return h('div', { style: { fontSize: '12px', fontWeight: 600, marginBottom: '4px' } }, text);
+        };
         var debugBody;
         if (!audit) {
           debugBody = muted(t.debugNone);
-        } else if (!audit.exists || audit.counts.retryOk + audit.counts.rescueOk === 0) {
-          debugBody = muted(t.debugEmpty);
+        } else if (guardOn) {
+          debugBody =
+            !audit.exists || audit.counts.retryOk + audit.counts.rescueOk === 0
+              ? muted(t.debugEmpty)
+              : h(
+                  'div',
+                  null,
+                  boldLine(t.debugSummary(audit.counts)),
+                  itemRows(audit.recent, function (item) {
+                    return item.kind === 'retry-ok' ? t.kindRetry : t.kindRescue;
+                  })
+                );
         } else {
-          debugBody = h(
-            'div',
-            null,
-            h('div', { style: { fontSize: '12px', fontWeight: 600, marginBottom: '4px' } }, t.debugSummary(audit.counts)),
-            (audit.recent || []).map(function (item, index) {
-              return h(
-                'div',
-                { key: String(index), style: { fontSize: '12px', lineHeight: '1.7', color: V.sub } },
-                '· ' + shortTime(item.at) + '　[' + (item.kind === 'retry-ok' ? t.kindRetry : t.kindRescue) + '] ' +
-                  (item.label || '-') + ' — ' + item.detail
-              );
-            })
-          );
+          debugBody =
+            !audit.exists || audit.counts.missed === 0
+              ? muted(t.debugMissedEmpty)
+              : h(
+                  'div',
+                  null,
+                  boldLine(t.debugMissedSummary(audit.counts)),
+                  itemRows(audit.missedRecent, function () { return t.kindMissed; })
+                );
         }
 
         return h(

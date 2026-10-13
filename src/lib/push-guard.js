@@ -546,8 +546,9 @@ export function apply(ctx, config) {
 		ctx.effect(() => {
 			const onEvent = (session, event) => {
 				try {
-					// 设置页关掉后，兜底立即停止（不必重启）
-					if (guardOff()) return;
+					// 注意：**关掉兜底后这个处理器仍要继续跑**。它不再补推，但仍要记账
+					// （见下面的 missed）——「关掉期间漏掉多少张卡片」只有继续观察才数得出来，
+					// 否则设置页那一栏永远是空的。
 					if (!event || typeof event !== "object") return;
 					const sessionId = session?.id ?? "?";
 
@@ -582,6 +583,25 @@ export function apply(ctx, config) {
 							ctx.logger?.warn?.("[push-guard] ⚠️ 本轮（会话 %s 第 %s 轮）看不出推送企图，未兜底；如需卡片请让模型显式调用", sessionId, current.turn);
 							audit({ kind: "no-push", sessionId, turn: current.turn, reason: "no-intent" });
 						}
+						return;
+					}
+
+					// 兜底被关掉时：**不补推，但照样记账**。
+					// 记成 missed 而不是 rescue-ok —— 设置页据此显示「关掉期间漏掉 N 张」。
+					// 关掉兜底的代价应该是看得见的，而不是悄悄少几张卡片。
+					if (guardOff()) {
+						audit({
+							kind: "missed",
+							level: card.level,
+							name: card.name,
+							sessionId,
+							turn: current.turn,
+							reason: card.level === "L1" ? "literal-text-unrescued" : "broken-promise-unrescued"
+						});
+						ctx.logger?.warn?.(
+							"[push-guard] ⚠️ %s 本该补推（会话 %s 第 %s 轮）：%s —— 但兜底已关闭，仅记账未推送",
+							card.level, sessionId, current.turn ?? "?", card.name
+						);
 						return;
 					}
 					const fingerprint = `${card.name}\n${card.content.length}\n${card.content.slice(0, 80)}`;
@@ -639,8 +659,31 @@ export function apply(ctx, config) {
 					const ambiguousAttempts = ambiguousBudget;
 					const fallbackScheduleId = String(settings.defaultScheduleId || DEFAULTS.defaultScheduleId).trim() || DEFAULTS.defaultScheduleId;
 					const wrapped = async (args, exec) => {
-						// 设置页关掉后：不补参、不重试，按原样调用（关闭必须真的关闭）
-						if (guardOff()) return original(args, exec);
+						// 设置页关掉后：不补参、不重试，按原样调用（关闭必须真的关闭）。
+						// 但**照样给失败记账**：调用失败了却没重试，就是"漏掉一张"。
+						if (guardOff()) {
+							const outcome = await original(args, exec);
+							try {
+								const verdict = classifyPush(outcome);
+								if (!verdict.ok) {
+									audit({
+										kind: "missed",
+										level: "L3",
+										name: String(args?.name ?? ""),
+										reason: verdict.retryable ? "failed-retryable-unretried" : "failed-permanent",
+										code: verdict.code ?? "",
+										message: String(verdict.message ?? "").slice(0, 160)
+									});
+									ctx.logger?.warn?.(
+										"[push-guard] ⚠️ hiboard_push 失败（%s，%s）—— 兜底已关闭，未重试，仅记账",
+										verdict.code || "-", verdict.retryable ? "本可重试" : "永久错误"
+									);
+								}
+							} catch {
+								/* 记账失败不影响工具本身的返回 */
+							}
+							return outcome;
+						}
 						// ---- 先补 schedule_id，再让工具校验/发送 ----
 						// 为什么必须补：scheduleTaskId 为空时负一屏**只显示一行标题**，
 						// 正文不渲染、详情页点不开（2026-09-27 用户实际遇到）。
