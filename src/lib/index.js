@@ -677,7 +677,11 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile, selfcheckReport, 
 				try {
 					if (ruleRequest === false) {
 						const r = removeRule(AGENTS_FILE);
-						notes.push(r.action === "removed" ? "已移除全局指令文件里的推送规则。" : "全局推送规则本来就不存在，未改动。");
+						// 关掉会**持久化** autoRule=false（见上面 patch.autoRule 那行），
+						// 也就是"此后保存授权码也不再写回"。这层影响必须在提示里说清 ——
+						// 否则用户会以为只是这一次不写，下次保存又冒出来（验收报告 §8-4）。
+						const tail = "此后保存授权码也不会自动写回；想恢复就再点开这个开关。";
+						notes.push(r.action === "removed" ? `已移除全局指令文件里的推送规则；${tail}` : `全局推送规则本来就不存在，未改动；${tail}`);
 					} else if (ruleRequest === true) {
 						const r = ensureRule(AGENTS_FILE);
 						notes.push(RULE_NOTE[r.action] ?? "已同步全局推送规则。");
