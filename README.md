@@ -6,6 +6,7 @@
 [![HarmonyOS NEXT](https://img.shields.io/badge/HarmonyOS-NEXT-000000?logo=huawei&logoColor=white)](#)
 [![dsh](https://img.shields.io/badge/DeepSeek%20Harness-0.1.5%20%7C%200.2-4B6BFB)](#)
 [![Node](https://img.shields.io/badge/Node.js-18%2B-339933?logo=node.js&logoColor=white)](#)
+[![Listed on dsh-plugin.org](https://dsh-plugin.org/badges/listed.svg)](https://dsh-plugin.org/plugins/maybemeibemaybi/dsh-harmonyos-hiboard)
 
 把 **DeepSeek Harness（dsh）** 的对话与任务结果，以 **服务卡片** 形式推送到华为鸿蒙
 **负一屏（智慧助手·今天）**，手机上点开即可看到完整的 Markdown 正文。
