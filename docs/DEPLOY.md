@@ -51,7 +51,8 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-harmonyos-hiboard"
 
 ## 第 3 步：写入授权码
 
-**推荐做法（图形界面）**：不用命令行 —— 打开 **设置 → 插件 → `dsh-harmonyos-hiboard`**，
+**推荐做法（图形界面）**：不用命令行 —— 打开 **主界面侧栏的「插件」面板 →
+`dsh-harmonyos-hiboard` → 点进它的页面**（**不在「设置」里**，见 README「设置卡片」一节），
 在「推送设置」卡片里填。输入框**裸授权码**和**整条关联指令**
 （`openclaw config set skills.entries.today-task.config.authCode <AUTH_CODE>`）都认，
 保存后立即生效，并显示当前生效来源。

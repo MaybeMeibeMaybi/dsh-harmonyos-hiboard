@@ -348,7 +348,7 @@ function hiboardPushTool({ resolveAuthCode, settings }) {
 			const authCode = resolveAuthCode();
 			if (!authCode) {
 				throw new Error(
-					"hiboard_push: 未配置授权码（authCode）。请在 dsh 的「插件」页打开本插件的设置卡片填写" +
+					"hiboard_push: 未配置授权码（authCode）。请打开 dsh 侧栏的「插件」面板 → 本插件 → 在「推送设置」卡片里填写" +
 					"（支持整条关联指令或裸授权码），或写进 profile 补丁层 hiboard-push.config.authCode，" +
 					`或设置环境变量 ${AUTH_CODE_ENV}。授权码获取：负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体。`
 				);
@@ -388,7 +388,7 @@ function hiboardVerifyTool({ resolveAuthCode, settings }) {
 			const authCode = resolveAuthCode();
 			if (!authCode) {
 				throw new Error(
-					"hiboard_verify: 未配置授权码（authCode）。请在 dsh 的「插件」页打开本插件的设置卡片填写" +
+					"hiboard_verify: 未配置授权码（authCode）。请打开 dsh 侧栏的「插件」面板 → 本插件 → 在「推送设置」卡片里填写" +
 					"（支持整条关联指令或裸授权码），或写进 profile 补丁层 hiboard-push.config.authCode，" +
 					`或设置环境变量 ${AUTH_CODE_ENV}。授权码获取：负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体。`
 				);
