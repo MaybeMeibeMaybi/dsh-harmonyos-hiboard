@@ -21,6 +21,7 @@
   "files": [
     "src",
     "docs",
+    "screenshots.json",
     "README.md",
     "LICENSE",
     "NOTICE"

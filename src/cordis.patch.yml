@@ -1,8 +1,11 @@
-# dsh-hiboard-push bundle patch
+# dsh-harmonyos-hiboard bundle patch
 #
 # Mounts the Huawei assistant-today (负一屏) push plugin into the profile
-# loader. `name` must resolve from the profile node_modules (installed via
-# `dsh plugin --profile <name> add github:Entity-Him/dsh-hiboard-push`).
+# loader. `name` must match the "name" field in this package's package.json:
+# the loader resolves it from the profile node_modules, so a mismatch means
+# the bundle silently fails to load.
+# Installed via:
+# `dsh plugin --profile <name> add github:MaybeMeibeMaybi/dsh-harmonyos-hiboard`
 - insert:
     - id: hiboard-push
-      name: 'dsh-hiboard-push'
+      name: 'dsh-harmonyos-hiboard'

@@ -116,14 +116,22 @@ TypeError: Cannot read properties of undefined (reading 'validate')
 前置：Windows / macOS / Linux + Node.js 18+ + dsh 已安装 + `pnpm` 已安装。
 
 ```bash
-# 1) 克隆到一个「路径不含空格」的位置（pnpm 的 file: 依赖会被空格截断）
-git clone https://github.com/MaybeMeibeMaybi/dsh-harmonyos-hiboard.git E:/dsh-vendor/dsh-harmonyos-hiboard
-
-# 2) 安装为 dsh 插件
-dsh plugin --profile web add "file:E:/dsh-vendor/dsh-harmonyos-hiboard"
+# 1) 安装为 dsh 插件（从 GitHub 安装，跨平台）
+dsh plugin --profile web add github:MaybeMeibeMaybi/dsh-harmonyos-hiboard
 ```
 
-**3) 写入授权码** —— 编辑 `~/.dsh/profiles/web/cordis.patch.yml`：
+<details>
+<summary>或者从本地克隆安装（改源码 / 调试时用）</summary>
+
+```bash
+# 路径不要含空格，否则 pnpm 的 file: 依赖会被空格截断
+git clone https://github.com/MaybeMeibeMaybi/dsh-harmonyos-hiboard.git <不含空格的路径>
+dsh plugin --profile web add "file:<不含空格的路径>"
+```
+
+</details>
+
+**2) 写入授权码** —— 编辑 `~/.dsh/profiles/web/cordis.patch.yml`：
 
 ```yaml
 - id: hiboard-push
@@ -134,21 +142,23 @@ dsh plugin --profile web add "file:E:/dsh-vendor/dsh-harmonyos-hiboard"
 授权码获取：手机 **负一屏 → 我的 → 动态管理 → 关联账号 → Claw 智能体**。
 
 > **装完/改过 `package.json` 后一定要重新注入**：profile 里的
-> `node_modules/dsh-hiboard-push` 是 pnpm **复制**进去的，不是链接。
+> `node_modules/dsh-harmonyos-hiboard` 是 pnpm **复制**进去的，不是链接。
 > 只改源目录会被旧副本盖住，表现为"改了没反应"。
 > `dsh plugin --profile web install` 之后用
-> `Select-String -Path "$env:USERPROFILE\.dsh\profiles\web\node_modules\dsh-hiboard-push\package.json" -Pattern "dsh-tools"`
+> `Select-String -Path "$env:USERPROFILE\.dsh\profiles\web\node_modules\dsh-harmonyos-hiboard\package.json" -Pattern "dsh-tools"`
 > 确认 peer 上界已是 `<0.3.0-0`。
 
-**4) 重启 dsh**，然后让 agent 调用 `hiboard_push`（记得传 `schedule_id`）。
+**3) 重启 dsh**，然后让 agent 调用 `hiboard_push`（记得传 `schedule_id`）。
 
-**5) 装推送兜底（强烈建议）** —— 不装的话，一旦 agent 把推送写成正文（见下节），
+**4) 装推送兜底（强烈建议）** —— 不装的话，一旦 agent 把推送写成正文（见下节），
 卡片会**静默消失**：
 
 ```bash
 # 推送兜底插件：push-guard（L1 抢救 / L2 承诺兜底 / L3 重试）
-git clone https://github.com/MaybeMeibeMaybi/dsh-harmonyos-hiboard.git E:/dsh-vendor/dsh-push-guard
-dsh plugin --profile web add "file:E:/dsh-vendor/dsh-push-guard/src/push-guard"
+# 注意：push-guard 是本仓库 src/ 下的**子包**，仓库根包是主插件，
+# 所以它不能用 github: 简写安装，需要克隆后指向子目录。
+git clone https://github.com/MaybeMeibeMaybi/dsh-harmonyos-hiboard.git <不含空格的路径>
+dsh plugin --profile web add "file:<不含空格的路径>/src/push-guard"
 ```
 
 `~/.dsh/profiles/web/cordis.patch.yml`：
@@ -297,7 +307,6 @@ dsh 会在**每个会话**里自动加载它。现成模板见
 └── src/
     ├── lib/index.js                           插件源码（兼容性修复版）
     ├── lib/index.js.upstream-backup           上游原始版本，便于比对
-    ├── package.json
     ├── cordis.patch.yml                       bundle 补丁（挂载插件用）
     └── push-guard/                            ★ 推送兜底插件（L1/L2/L3 + 自检 + 审计）
         ├── lib/index.js
@@ -317,7 +326,7 @@ dsh 会在**每个会话**里自动加载它。现成模板见
 
 > **dsh 0.2 注意**：0.2 起会对插件的 `peerDependencies` 做准入检查，
 > 不匹配则**整个 bundle 被跳过**（工具随之消失）。
-> 本仓库自 **`dsh-hiboard-push` 0.2.0 / 仓库 0.5.0** 起已放宽 peer 上界到 `<0.3.0-0`。
+> 本仓库自 **`dsh-harmonyos-hiboard` 0.5.0** 起已放宽 peer 上界到 `<0.3.0-0`。
 > 若你用的是更早的副本，请升级或自行放宽，否则在 dsh 0.2 上会被拒载 ——
 > 详见 [`docs/UPDATES-2026-10-12.md`](docs/UPDATES-2026-10-12.md)。
 >

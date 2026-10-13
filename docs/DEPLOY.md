@@ -14,30 +14,38 @@
 
 ---
 
-## 第 1 步：放置插件源码
+## 第 1 步：获取插件源码（可选）
 
-**必须放在路径不含空格的目录**（pnpm / npm 的 `file:` 依赖会把空格路径截断，
+**方式 A：不克隆。** 直接用 GitHub 安装（推荐，见第 2 步方式 A）。
+
+**方式 B：本地克隆**（改源码 / 调试时用）。
+**克隆路径必须不含空格**（pnpm / npm 的 `file:` 依赖会把空格路径截断，
 报 `ERR_PNPM_LINKED_PKG_DIR_NOT_FOUND`）。
 
 ```powershell
-# 示例：放到 E:\dsh-vendor\dsh-hiboard-push-main
-New-Item -ItemType Directory -Force -Path 'E:\dsh-vendor\dsh-hiboard-push-main' | Out-Null
-Copy-Item -Recurse -Force '<本项目>\src\*' 'E:\dsh-vendor\dsh-hiboard-push-main\'
+git clone https://github.com/MaybeMeibeMaybi/dsh-harmonyos-hiboard.git E:\dsh-vendor\dsh-harmonyos-hiboard
 ```
+
+> 仓库**根目录**就是插件包（`package.json` 里声明了 `dsh.bundle`）。
+> 不要再像旧布局那样只把 `src/` 复制出去单独安装 —— `src/package.json` 已移除。
 
 ---
 
 ## 第 2 步：安装到 web profile
 
 ```powershell
-dsh plugin --profile web add "file:E:/dsh-vendor/dsh-hiboard-push-main"
+# 方式 A（推荐）：直接从 GitHub 安装
+dsh plugin --profile web add github:MaybeMeibeMaybi/dsh-harmonyos-hiboard
+
+# 方式 B：安装本地克隆
+dsh plugin --profile web add "file:E:/dsh-vendor/dsh-harmonyos-hiboard"
 ```
 
 > 前提：本机已安装 **pnpm**（`dsh plugin` 转发给 pnpm）。
 > 若报 `'pnpm' is not recognized`：`npm install -g pnpm`，然后重开终端。
 
 安装成功后，`~/.dsh/profiles/web/package.json` 的 `dsh.profile.bundles` 里会出现
-`dsh-hiboard-push`。
+`dsh-harmonyos-hiboard`。
 
 ---
 
@@ -104,7 +112,7 @@ hiboard_push
 |---|---|---|
 | dsh 启动即崩，报 `undefined (reading 'validate')` | 插件 `Config` 不是 schemastery schema（用了未修的上游版本） | 用本包 `src/lib/index.js`（已修） |
 | dsh 启动即崩，报 `only the launching environment may set` | 授权码写进了 `.env` | 删掉那行，改放 `cordis.patch.yml` |
-| `Cannot find package 'dsh-hiboard-push'` | 插件没装进 profile | 重跑第 2 步 |
+| `Cannot find package 'dsh-harmonyos-hiboard'` | 插件没装进 profile | 重跑第 2 步 |
 | `ERR_PNPM_LINKED_PKG_DIR_NOT_FOUND` | 源码目录路径含空格 | 换到无空格路径（第 1 步） |
 | 推送返回 `0000900034` | 授权码无效/过期 | 重新取码，改 `cordis.patch.yml`，重启 |
 | 推送返回 `404 {"message":"Not Found"}`（`Server: elb`） | **华为侧 ELB 坏窗口**：请求没到业务服务，与授权码/正文无关 | 见 [`ENDPOINT-NOTES.md`](ENDPOINT-NOTES.md) 第 3 节：用错误 authCode 探一次即可判定。坏窗口会自行恢复；`push-guard` 已把 404 视为可重试（指数退避） |
