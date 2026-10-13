@@ -108,6 +108,10 @@ window.__ModuleLoader__.load({
         sourcePlaceholder: 'DeepSeek Harness',
         sourceHint: '负一屏卡片上显示的「来源 / AI 工具名」，输入框留空并保存即恢复默认。',
         sourceReset: '恢复默认',
+        guideTitle: '安装后请在插件设置页输入授权码',
+        guideWhere: 'DSH主页面左上角「插件」→ 「dsh-harmonyos-hiboard」',
+        guideOk: '确定',
+        guideLater: '稍后',
         debugTitle: '兜底战绩',
         debugSummary: function (c) {
           return '已救回 ' + (c.retryOk + c.rescueOk) + ' 次（重试 ' + c.retryOk + ' · 补推 ' + c.rescueOk + '）';
@@ -164,6 +168,10 @@ window.__ModuleLoader__.load({
         sourcePlaceholder: 'DeepSeek Harness',
         sourceHint: 'The brand / AI tool name shown on the card; save an empty value to restore the default.',
         sourceReset: 'Reset',
+        guideTitle: "Enter your auth code on this plugin's settings page.",
+        guideWhere: 'In DSH: top-left 「Plugins」 → 「dsh-harmonyos-hiboard」',
+        guideOk: 'OK',
+        guideLater: 'Later',
         debugTitle: 'Rescues so far',
         debugSummary: function (c) {
           return 'Saved ' + (c.retryOk + c.rescueOk) + ' (retries ' + c.retryOk + ', pushes ' + c.rescueOk + ')';
@@ -625,6 +633,85 @@ window.__ModuleLoader__.load({
           ConfigCard
         );
       });
+
+      // 「启用后指引」：官方座席，装/启用后提示去填授权码，点「确定」一键跳到本插件设置页。
+      // 单独包一层 try：这个座席是后加的，宿主没有它时不该影响上面的设置卡片。
+      try {
+        var Guide = ActivationGuide(react, ui, localeRef);
+        ctx.slots.inject('plugins.bundle.activation', function* () {
+          yield ctx.slots.register({ name: 'plugins.bundle.activation', key: PACKAGE_NAME }, Guide);
+        });
+      } catch (error) {
+        console.error('[hiboard-push] activation guide skipped: ' + error);
+      }
+    }
+
+    // ------------------------------------------------------------ 启用后指引
+    /**
+     * 「装完请去设置页填授权码」的提示。
+     *
+     * 挂的是**官方座席** `plugins.bundle.activation`（key = 包名）。宿主在「插件」页里
+     * **内联**渲染它（plugin-manager 的 PluginManagerPage：`renderSlot("plugins.bundle.activation", …)`），
+     * 外壳由注册者自己画 —— dsh **没有**给插件开"弹模态框"的口子，这个座席就是官方的对应物：
+     * 它出现在用户从列表里**启用本插件的那一刻**，正是"该去填授权码"的时机，并给两个回调：
+     *
+     *   onDismiss      收起这条指引
+     *   onOpenDetails  收起并**跳到本插件的详情页** —— 也就是它的设置页
+     *
+     * 只在**授权码尚未配置**时显示：已经配好的人不该再被念一遍。
+     */
+    function ActivationGuide(react, ui, localeRef) {
+      var h = react.createElement;
+      var useState = react.useState;
+      var useEffect = react.useEffect;
+      var Button = ui.Button;
+      var V = {
+        sub: 'var(--dsw-alias-label-tertiary, rgba(127,127,127,0.9))',
+        border: 'var(--dsw-alias-border-l2, rgba(127,127,127,0.28))'
+      };
+
+      return function HiboardActivationGuide(props) {
+        var t = TEXT[pickLang(localeRef)];
+        var state = useState(null); // null = 查询中；true = 已配置；false = 未配置
+        var configured = state[0];
+        var setConfigured = state[1];
+
+        useEffect(function () {
+          var alive = true;
+          fetch(ROUTE, { headers: { accept: 'application/json' } })
+            .then(function (res) { return res.ok ? res.json() : null; })
+            .then(function (data) {
+              if (!alive) return;
+              setConfigured(Boolean(data && data.authCode && data.authCode.configured));
+            })
+            .catch(function () { if (alive) setConfigured(false); });
+          return function () { alive = false; };
+        }, []);
+
+        // 已配好 → 不打扰；还没查出来 → 先不闪一下再消失
+        if (configured !== false) return null;
+
+        return h(
+          'div',
+          {
+            style: {
+              margin: '0 16px 12px',
+              padding: '12px',
+              border: '1px solid ' + V.border,
+              borderRadius: '12px'
+            }
+          },
+          // 第一行：主文案
+          h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, t.guideTitle),
+          // 第二行：小字，指路
+          h('div', { style: { fontSize: '12px', lineHeight: '1.7', color: V.sub } }, t.guideWhere),
+          h('div', { style: { display: 'flex', gap: '8px', marginTop: '10px' } }, [
+            // 「确定」= 收起指引并跳到本插件的设置页
+            h(Button, { variant: 'primary', size: 'sm', onClick: props.onOpenDetails }, t.guideOk),
+            h(Button, { variant: 'ghost', size: 'sm', onClick: props.onDismiss }, t.guideLater)
+          ])
+        );
+      };
     }
 
     function apply(ctx) {
