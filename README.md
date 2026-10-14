@@ -221,6 +221,27 @@ openclaw config set skills.entries.today-task.config.authCode aaaaaaaaaaaa    # 
 另外 profile 里的 `node_modules/<包名>` 是 pnpm **复制**进去的、不是软链，
 所以只改源目录会被旧副本盖住，得重新 `dsh plugin --profile web install`。
 
+> ⚠️ **升级时请显式写版本号，否则你可能一直停在旧版本。**
+>
+> `dsh plugin add dsh-harmonyos-hiboard` 会把**当时装到的版本**记成 `^<版本>` 写进 profile。
+> 而 semver 的 caret 在 `0.x` 上**锁死 minor**：`^0.9.2` 表示 `>=0.9.2 <0.10.0`，
+> **永远升不到 `0.10.0`**。这不是猜测，用 npm 自己就能验证：
+>
+> ```bash
+> npm view 'dsh-harmonyos-hiboard@^0.9.2' version     # → 只有 0.9.2
+> npm view 'dsh-harmonyos-hiboard@^0.10.0' version    # → 只有 0.10.0
+> ```
+>
+> 所以升级要**写清楚目标**：
+>
+> ```bash
+> dsh plugin --profile web add dsh-harmonyos-hiboard@latest    # 跟最新
+> dsh plugin --profile web add dsh-harmonyos-hiboard@1.2.3     # 钉到指定版本
+> ```
+>
+> 想确认当前装的是哪一版：
+> `node -p "require(require.resolve('dsh-harmonyos-hiboard/package.json')).version"`
+
 **4. 插件往一个不带鉴权的本地路由读写配置。**
 设置卡片靠注册在 webServer 上的原始路由 `/hiboard-push/config` 读写配置，它
 **不继承 dsh Connection 的登录认证**。若你把 dsh 暴露在需要鉴权的入口后面，
