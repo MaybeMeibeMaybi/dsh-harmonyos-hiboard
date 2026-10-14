@@ -112,6 +112,7 @@ window.__ModuleLoader__.load({
         guideWhere: 'DSH主页面左上角「插件」→ 「dsh-harmonyos-hiboard」',
         guideOk: '确定',
         guideLater: '稍后',
+        guideInCard: '还没配置授权码 —— 在下面输入框粘贴它，保存后即可推送。',
         debugTitle: '兜底战绩',
         debugSummary: function (c) {
           return '已救回 ' + (c.retryOk + c.rescueOk) + ' 次（重试 ' + c.retryOk + ' · 补推 ' + c.rescueOk + '）';
@@ -172,6 +173,7 @@ window.__ModuleLoader__.load({
         guideWhere: 'In DSH: top-left 「Plugins」 → 「dsh-harmonyos-hiboard」',
         guideOk: 'OK',
         guideLater: 'Later',
+        guideInCard: 'No auth code yet — paste it in the field below and save to start pushing.',
         debugTitle: 'Rescues so far',
         debugSummary: function (c) {
           return 'Saved ' + (c.retryOk + c.rescueOk) + ' (retries ' + c.retryOk + ', pushes ' + c.rescueOk + ')';
@@ -476,6 +478,26 @@ window.__ModuleLoader__.load({
             h(Button, { variant: 'primary', size: 'sm', onClick: onSave, disabled: busy === 'auth' }, t.save),
             h(Button, { variant: 'outline', size: 'sm', onClick: onClear, disabled: busy === 'auth' || !(info && info.configured) }, t.clear)
           ]),
+          // 授权码还没配时，直接在卡片里给一条醒目提示 —— 这是「装完提示」的**兜底**。
+          // 那个提示挂在官方座席 `plugins.bundle.activation` 上，只在用户从「插件」面板
+          // **主动启用**时才触发（列表开关 / 安装对话框的「立即启用」）；用 CLI 安装、
+          // 或重启后自动挂载，都不会触发它。而这一条只要进到设置页就一定看得到。
+          info && !info.configured
+            ? h(
+                'div',
+                {
+                  style: {
+                    margin: '8px 0',
+                    padding: '8px 10px',
+                    border: '1px solid ' + V.border,
+                    borderRadius: '8px',
+                    fontSize: '12px',
+                    lineHeight: '1.7'
+                  }
+                },
+                t.guideInCard
+              )
+            : null,
           preview,
           muted(t.commandHint, { marginTop: '8px' }),
           muted(t.whereHint, { marginTop: '4px' }),
