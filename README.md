@@ -221,21 +221,35 @@ openclaw config set skills.entries.today-task.config.authCode aaaaaaaaaaaa    # 
 另外 profile 里的 `node_modules/<包名>` 是 pnpm **复制**进去的、不是软链，
 所以只改源目录会被旧副本盖住，得重新 `dsh plugin --profile web install`。
 
-> ⚠️ **升级时请显式写版本号，否则你可能一直停在旧版本。**
+> ⚠️ **升级装不上新版本？两个独立的坑，别搞混。**
 >
-> `dsh plugin add dsh-harmonyos-hiboard` 会把**当时装到的版本**记成 `^<版本>` 写进 profile。
-> 而 semver 的 caret 在 `0.x` 上**锁死 minor**：`^0.9.2` 表示 `>=0.9.2 <0.10.0`，
-> **永远升不到 `0.10.0`**。这不是猜测，用 npm 自己就能验证：
+> **坑 A：版本范围。** `dsh plugin add dsh-harmonyos-hiboard` 会把**当时装到的版本**记成
+> `^<版本>` 写进 profile。而 semver 的 caret 在 `0.x` 上**锁死 minor**：
+> `^0.9.2` 表示 `>=0.9.2 <0.10.0`，**永远升不到 `0.10.0`**。用 npm 自己就能验证：
 >
 > ```bash
 > npm view 'dsh-harmonyos-hiboard@^0.9.2' version     # → 只有 0.9.2
-> npm view 'dsh-harmonyos-hiboard@^0.10.0' version    # → 只有 0.10.0
 > ```
 >
-> 所以升级要**写清楚目标**：
+> **坑 B：pnpm 的「最小发布年龄」策略（更隐蔽）。** pnpm 11 起**默认
+> `minimumReleaseAge = 1440` 分钟（24 小时）** —— 发布不满 1 天的版本**不会被解析**。
+> 见 [pnpm 官方说明](https://pnpm.io/supply-chain-security#delay-dependency-updates)。
+> 所以**刚发版的那一天，用 `@latest` 也装不到新版**，会静默退回一个更旧的版本
+> （安装日志里那句 `✓ Lockfile passes supply-chain policies` 就是这层策略在说话）。
 >
 > ```bash
-> dsh plugin --profile web add dsh-harmonyos-hiboard@latest    # 跟最新
+> # 看策略是不是在生效（默认 1440）
+> pnpm config get minimumReleaseAge
+>
+> # 只想立刻拿到新版：按官方文档退出该策略（写进 pnpm-workspace.yaml）
+> #   minimumReleaseAge: 0
+> # 或者干脆等够 24 小时 —— 什么都不用改
+> ```
+>
+> **正确做法**：升级时写清楚目标，并留意发布时间。
+>
+> ```bash
+> dsh plugin --profile web add dsh-harmonyos-hiboard@latest    # 跟最新（受坑 B 约束）
 > dsh plugin --profile web add dsh-harmonyos-hiboard@1.2.3     # 钉到指定版本
 > ```
 >
