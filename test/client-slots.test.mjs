@@ -131,7 +131,7 @@ test("启用后指引的文案是用户指定的措辞（中英都在）", () =>
 	assert.equal(text.en.guideOk, "OK");
 	// 中英都要有，不能漏
 	for (const lang of ["zh", "en"]) {
-		for (const key of ["guideTitle", "guideWhere", "guideOk", "guideLater"]) {
+		for (const key of ["guideTitle", "guideWhere", "guideOk", "guideLater", "guideInCard"]) {
 			assert.ok(String(text[lang][key] ?? "").length > 0, `${lang}.${key} 不能为空`);
 		}
 	}
