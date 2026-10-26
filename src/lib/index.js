@@ -496,7 +496,7 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile, selfcheckReport, 
 			return empty;
 		}
 		const lines = text.split("\n").filter(Boolean).slice(-AUDIT_MAX_LINES);
-		const counts = { retryOk: 0, rescueOk: 0, failed: 0, missed: 0 };
+		const counts = { retryOk: 0, rescueOk: 0, recoverOk: 0, failed: 0, missed: 0 };
 		const recent = [];
 		const missedRecent = [];
 		/** missed 的原因码 → 面板上的说法。 */
@@ -543,7 +543,23 @@ function buildConfigRoute({ authCodeInfo, settings, storeFile, selfcheckReport, 
 					label: row.name ?? "",
 					detail: MISSED_REASON[row.reason] ?? String(row.reason ?? "未推送")
 				});
-			} else if (row?.kind === "push-failed" || row?.kind === "rescue-failed" || row?.kind === "rescue-error") {
+			} else if (row?.kind === "recover-ok") {
+				// 标题超长被平台拒收 → 压短后重发成功。**与"重试"是两件事**，
+				// 所以面板上单独算一栏，不能把它混进 retryOk（那会让日志说谎）。
+				counts.recoverOk += 1;
+				recent.push({
+					kind: "recover-ok",
+					at: row.at ?? "",
+					level: "",
+					label: row.taskName ?? "",
+					detail: `标题超长，压到 ${row.toLength ?? "?"} 字符后发送成功（原 ${row.fromLength ?? "?"} 字符）`
+				});
+			} else if (
+				row?.kind === "push-failed" ||
+				row?.kind === "rescue-failed" ||
+				row?.kind === "rescue-error" ||
+				row?.kind === "recover-failed"
+			) {
 				counts.failed += 1;
 			}
 		}

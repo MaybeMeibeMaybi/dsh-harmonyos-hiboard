@@ -296,6 +296,7 @@ dsh 对插件描述没有本地化钩子（`description` 只能是一个字符�
 | **L1 抢救** | 正文出现字面量调用标记，但该轮**从未真正调用**工具 | 用同一解析器还原参数，原样代为推送 |
 | **L2 抢救** | 该轮未推送，但正文**明确承诺了推送**且正文够长 | 用该轮正文补推，`result` 标注"模型未调用推送工具" |
 | **L3 重试** | 工具真调用了但失败 | **按错误类别**重试，分两份预算：<br>· **确定没送达**（ELB 直出的 HTTP 404）→ 按 `retryCount`（默认 3）多试几次<br>· **可能已送达**（超时 / 5xx / 未知失败码）→ 只按 `ambiguousRetryCount`（默认 1）少试 —— 每次重试都是新 `msgId`、平台不去重，多试就可能多出一张重复卡片<br>· 永久错误（`0000900034`、405）不重试<br>退避是指数的（基数 × 2ⁿ⁻¹，封顶 60s），以便跨过几十秒的坏窗口 |
+| **标题超长恢复** | 平台返回 `0000500002`（标题 > 64 字符） | **把标题再压到 40 字符、重发一次**（只一次，不循环）。<br>为什么敢重发：这是**参数校验拒绝**，平台明确没接收，不可能产生重复卡片。<br>为什么只压一档：同一负载重发是确定性的、毫无意义，只有**改小**才是另一个请求；若 40 字符仍被拒，原因就不是长度粒度了，如实标永久 |
 
 另外，`schedule_id` 是**双保险**：调用契约里声明为必填（漏传直接被参数校验拒绝），
 兜底再检测空串 / 纯空格并自动补 `dsh_worklog`（**明确传值不覆盖**）。
@@ -312,7 +313,7 @@ dsh 对插件描述没有本地化钩子（`description` 只能是一个字符�
 <DSH_HOME>/lan/push-guard/
 ├── startup.json      启动自检：authCode 是否配置、三级开关、pid
 ├── last-state.json   最近一次兜底推送（哪一轮、哪一级、成功与否）
-└── audit.jsonl       流水：push-ok / push-failed / retry-ok / rescue-ok / missed / no-push
+└── audit.jsonl       流水：push-ok / push-failed / retry-ok / rescue-ok / recover-ok / recover-failed / missed / no-push
 ```
 
 让 agent 调一次 `hiboard_push_selfcheck`，确认三件事：**兜底生效了、`hiboard_push` 被接管了、

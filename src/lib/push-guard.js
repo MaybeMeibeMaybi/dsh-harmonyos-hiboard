@@ -70,7 +70,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFil
 import { homedir } from "node:os";
 import { join } from "node:path";
 import z from "@deepseek-ai/schemastery";
-import { clampCardName } from "./card-limits.js";
+import { clampCardName, isTitleTooLongFailure, shrinkCardName } from "./card-limits.js";
 import { SELFCHECK_OUTPUT_SCHEMA, SELFCHECK_PARAMETERS } from "./tool-schemas.js";
 
 export const name = "push-guard";
@@ -734,6 +734,8 @@ export function apply(ctx, config) {
 						try {
 							let verdict = classifyPush(outcome);
 							let tries = 0;
+							/** 是否已记过 recover-failed：避免同一次丢失写两条审计。 */
+							let recoverRecorded = false;
 							for (;;) {
 								if (verdict.ok || !verdict.retryable) break;
 								// 用哪份预算取决于失败类别：确定未送达（ELB 直出的 404）敢多试几次；
@@ -760,8 +762,49 @@ export function apply(ctx, config) {
 								outcome = next;
 								verdict = classifyPush(next);
 							}
+							// ---- 标题超长：**改小后恢复发送一次**（不是"重试几次"）----
+							// 为什么敢再发：0000500002 是**参数校验拒绝**，平台明确没接收这张卡，
+							// 所以不可能产生重复卡片（与"ELB 直出 404 可重试"是同一个理由）。
+							// 为什么只压一档：同一负载重发是确定性的、毫无意义；只有**改小**才是另一个
+							// 请求。若压到 40 字符仍被拒，原因就不是长度粒度了（别的字段 / 平台改规则 /
+							// 编码问题），再加档只会烧时间并搅浑日志 —— 那时如实标永久才对。
+							if (!verdict.ok && isTitleTooLongFailure(verdict)) {
+								const originalName = String(effectiveArgs?.name ?? "");
+								const shorter = shrinkCardName(originalName);
+								if (shorter && shorter !== originalName) {
+									ctx.logger?.warn?.(
+										"[push-guard] 标题超长（%s），压到 %d 字符后恢复发送一次（原 %d 字符）",
+										verdict.code || String(verdict.message ?? "").slice(0, 60) || "-",
+										shorter.length,
+										originalName.length
+									);
+									const retried = await original({ ...effectiveArgs, name: shorter }, exec);
+									const retriedVerdict = classifyPush(retried);
+									if (retriedVerdict.ok) {
+										audit({ kind: "recover-ok", fromLength: originalName.length, toLength: shorter.length, taskName: retried?.taskName });
+										return {
+											...retried,
+											message: `${retried?.message ? `${retried.message}；` : ""}标题超长（原 ${originalName.length} 字符），已自动压到 ${shorter.length} 字符后发送成功`
+										};
+									}
+									recoverRecorded = true;
+									audit({
+										kind: "recover-failed",
+										code: retriedVerdict.code,
+										fromLength: originalName.length,
+										toLength: shorter.length,
+										message: String(retriedVerdict.message).slice(0, 200)
+									});
+									ctx.logger?.warn?.("[push-guard] 压到 %d 字符后仍失败（%s），按原结论处理", shorter.length, retriedVerdict.code || "-");
+									outcome = retried;
+									verdict = retriedVerdict;
+								}
+							}
 							if (!verdict.ok) {
-								audit({ kind: "push-failed", code: verdict.code, retryable: verdict.retryable, tries, message: String(verdict.message).slice(0, 200) });
+								// 恢复失败已经记过一条 recover-failed，就不再重复记 push-failed
+								if (!recoverRecorded) {
+									audit({ kind: "push-failed", code: verdict.code, retryable: verdict.retryable, tries, message: String(verdict.message).slice(0, 200) });
+								}
 								ctx.logger?.warn?.("[push-guard] 推送最终失败（%s，%s）：%s",
 									verdict.code || "-", verdict.retryable ? "可重试但已用尽" : "永久错误，不重试", String(verdict.message).slice(0, 160));
 							} else {

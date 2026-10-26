@@ -56,3 +56,48 @@ export function isCardNameTruncated(name) {
 	const text = typeof name === "string" ? name : String(name ?? "");
 	return text.length > MAX_CARD_NAME;
 }
+
+/**
+ * 恢复发送时把标题压到的长度。
+ *
+ * 比上限 64 再留 24 字符余量，用来吸收"平台的计数方式与我们的 `.length` 不一致"
+ * （emoji / 组合字符 / 未来收紧上限）。**只压一档，不做阶梯循环。**
+ */
+export const RECOVERY_CARD_NAME = 40;
+
+/**
+ * 把标题再压短一档，用于"平台仍然嫌长"时的**恢复发送**。
+ *
+ * 与 `clampCardName` 的区别：那个是**预防**（按实测上限 64，发送前就裁好），
+ * 这个是**兜底**（收到"太长"拒绝后再压一档重发）。两者叠加，压一次就够 ——
+ * 因为同一负载重发是确定性的，只有**改小**才是另一个请求。
+ *
+ * @param {unknown} name - 原始标题
+ * @returns {string} 压短后的标题（已经够短时原样返回，调用方据此判断"还能不能再压"）
+ */
+export function shrinkCardName(name) {
+	const text = typeof name === "string" ? name : String(name ?? "");
+	if (text.length <= RECOVERY_CARD_NAME) return text;
+	return `${text.slice(0, RECOVERY_CARD_NAME - 1)}…`;
+}
+
+/** 平台"标题超长"的业务码（实测：`Parameter scheduleTaskName size is too long`）。 */
+export const TITLE_TOO_LONG_CODE = "0000500002";
+
+/** 从错误消息里也能认出"太长"（平台可能换码，但消息形态稳定）。 */
+const TOO_LONG_MESSAGE_RE = /size is too long|\bis too long\b/i;
+
+/**
+ * 这次失败是不是"标题超长"—— 决定要不要走**恢复发送**。
+ *
+ * 纯函数，所以能被 `test/card-limits.test.mjs` 直接覆盖；
+ * 真正"改小再发一次"的接线在 `push-guard.js` 的 L3 包装里。
+ *
+ * @param {{code?: string, message?: string}} verdict - classifyPush 的结果
+ * @returns {boolean}
+ */
+export function isTitleTooLongFailure(verdict) {
+	if (!verdict) return false;
+	if (String(verdict.code ?? "") === TITLE_TOO_LONG_CODE) return true;
+	return TOO_LONG_MESSAGE_RE.test(String(verdict.message ?? ""));
+}

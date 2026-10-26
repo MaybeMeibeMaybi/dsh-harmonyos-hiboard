@@ -115,7 +115,10 @@ window.__ModuleLoader__.load({
         guideInCard: '还没配置授权码 —— 在下面输入框粘贴它，保存后即可推送。',
         debugTitle: '兜底战绩',
         debugSummary: function (c) {
-          return '已救回 ' + (c.retryOk + c.rescueOk) + ' 次（重试 ' + c.retryOk + ' · 补推 ' + c.rescueOk + '）';
+          var parts = ['重试 ' + c.retryOk, '补推 ' + c.rescueOk];
+          // 「恢复」= 标题超长被拒后压短重发成功，与"重试"是两件事，单独列一栏
+          if (c.recoverOk) parts.push('恢复 ' + c.recoverOk);
+          return '已救回 ' + (c.retryOk + c.rescueOk + (c.recoverOk || 0)) + ' 次（' + parts.join(' · ') + '）';
         },
         debugEmpty: '还没有需要兜底的记录 —— 每次推送都成功调用了工具。',
         debugNone: '兜底还没有运行记录。',
@@ -125,6 +128,7 @@ window.__ModuleLoader__.load({
         debugMissedEmpty: '兜底关闭期间还没有漏推记录。',
         kindRetry: '重试',
         kindRescue: '补推',
+        kindRecover: '恢复',
         kindMissed: '漏推',
         loadFailed: '读取配置失败',
         saveFailed: '保存失败',
@@ -176,7 +180,9 @@ window.__ModuleLoader__.load({
         guideInCard: 'No auth code yet — paste it in the field below and save to start pushing.',
         debugTitle: 'Rescues so far',
         debugSummary: function (c) {
-          return 'Saved ' + (c.retryOk + c.rescueOk) + ' (retries ' + c.retryOk + ', pushes ' + c.rescueOk + ')';
+          var parts = ['retries ' + c.retryOk, 'rescues ' + c.rescueOk];
+          if (c.recoverOk) parts.push('recovered ' + c.recoverOk);
+          return 'Saved ' + (c.retryOk + c.rescueOk + (c.recoverOk || 0)) + ' (' + parts.join(', ') + ')';
         },
         debugEmpty: 'Nothing needed rescuing yet — every push called the tool successfully.',
         debugNone: 'The safety net has no run records yet.',
@@ -186,6 +192,7 @@ window.__ModuleLoader__.load({
         debugMissedEmpty: 'Nothing has gone missing while the net was off.',
         kindRetry: 'retry',
         kindRescue: 'rescue',
+        kindRecover: 'recovered',
         kindMissed: 'missed',
         loadFailed: 'Could not load the configuration',
         saveFailed: 'Could not save',
@@ -427,7 +434,9 @@ window.__ModuleLoader__.load({
                   null,
                   boldLine(t.debugSummary(audit.counts)),
                   itemRows(audit.recent, function (item) {
-                    return item.kind === 'retry-ok' ? t.kindRetry : t.kindRescue;
+                    if (item.kind === 'retry-ok') return t.kindRetry;
+                    if (item.kind === 'recover-ok') return t.kindRecover;
+                    return t.kindRescue;
                   })
                 );
         } else {
