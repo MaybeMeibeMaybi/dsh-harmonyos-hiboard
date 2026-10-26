@@ -70,6 +70,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFil
 import { homedir } from "node:os";
 import { join } from "node:path";
 import z from "@deepseek-ai/schemastery";
+import { clampCardName } from "./card-limits.js";
 import { SELFCHECK_OUTPUT_SCHEMA, SELFCHECK_PARAMETERS } from "./tool-schemas.js";
 
 export const name = "push-guard";
@@ -348,6 +349,9 @@ function postJson(url, payload) {
 
 function buildPayload({ authCode, name, content, result, scheduleId, source }) {
 	const nowSec = Math.floor(Date.now() / 1000);
+	// 标题同时用作 scheduleTaskName 与 summary，平台上限 64 字符（实测，见 card-limits.js）。
+	// 兜底自己补推时同样要裁，否则超长标题一样会被平台拒收、卡片丢失。
+	const cardName = clampCardName(name);
 	return {
 		data: {
 			authCode,
@@ -355,8 +359,8 @@ function buildPayload({ authCode, name, content, result, scheduleId, source }) {
 				{
 					msgId: `dsh_guard_${nowSec}_${Math.random().toString(36).slice(2, 10)}`,
 					scheduleTaskId: scheduleId ?? "",
-					scheduleTaskName: name,
-					summary: name,
+					scheduleTaskName: cardName,
+					summary: cardName,
 					result,
 					content,
 					source: String(source ?? "").trim() || DEFAULTS.source,
@@ -369,7 +373,15 @@ function buildPayload({ authCode, name, content, result, scheduleId, source }) {
 
 const SUCCESS_RE = /"code"\s*:\s*"(0{10}|0)"/;
 /** 已知永久错误码（重试没有意义）。 */
-const PERMANENT_CODES = new Set(["0000900034"]);
+const PERMANENT_CODES = new Set([
+	"0000900034", // 授权码无效 / 未授权
+	"0000500002"  // Parameter ... is too long（实测：标题 > 64 字符，2026-10-17 真实丢过一张卡）
+]);
+/**
+ * 消息里就能看出"永久"的错误 —— 例如 `Parameter scheduleTaskName size is too long`。
+ * 这类重试一万次结果也一样，归为永久，别浪费重试预算（2026-10-17 就白试了一次）。
+ */
+const PERMANENT_MESSAGE_RE = /size is too long|\bis too long\b/i;
 
 /**
  * 判断一次推送结果：成功 / 可重试 / 永久失败。
@@ -402,7 +414,10 @@ export function classifyPush(result) {
 		// 工具把 HTTP 状态码透传上来了（见 dsh-hiboard-push 的 sendPush）：404 是 ELB 坏窗口，
 		// 确定没送达 → 敢多试；其余 4xx（如 405）是永久错误。
 		const is404 = status === 404;
-		const permanent = PERMANENT_CODES.has(toolCode) || (status >= 400 && status < 500 && !is404);
+		const permanent =
+			PERMANENT_CODES.has(toolCode) ||
+			PERMANENT_MESSAGE_RE.test(String(result.message ?? "")) ||
+			(status >= 400 && status < 500 && !is404);
 		const retryable = !permanent;
 		return { ok: false, retryable, ambiguous: retryable && !is404, code: toolCode, message: String(result.message ?? "") };
 	}
@@ -414,7 +429,7 @@ export function classifyPush(result) {
 	if (result.ok) {
 		if (SUCCESS_RE.test(body)) return { ok: true, retryable: false, ambiguous: false, code: "", message: "OK" };
 		if (result.success === false) {
-			const retryable = !PERMANENT_CODES.has(code);
+			const retryable = !PERMANENT_CODES.has(code) && !PERMANENT_MESSAGE_RE.test(body);
 			// 业务侧已经回过话了（只是说失败）→ 到底有没有落库不确定，算"可能已送达"
 			return { ok: false, retryable, ambiguous: retryable, code, message: body };
 		}
@@ -426,7 +441,10 @@ export function classifyPush(result) {
 	// 坏窗口里的推送静默丢失；而它由 ELB 直出、业务侧根本没处理，重试不会造成重复卡片。
 	// 其余 4xx（如 405 用错方法）仍是永久错误。
 	const isTransient404 = result.status === 404;
-	const permanent = PERMANENT_CODES.has(code) || (result.status >= 400 && result.status < 500 && !isTransient404);
+	const permanent =
+		PERMANENT_CODES.has(code) ||
+		PERMANENT_MESSAGE_RE.test(body) ||
+		(result.status >= 400 && result.status < 500 && !isTransient404);
 	const retryable = !permanent;
 	// ambiguous 决定用哪份重试预算（见 Config.ambiguousRetryCount）：只有"ELB 直出的 404"
 	// 能**确定**请求没进业务服务；超时 / 无响应 / 5xx 都可能其实已经落库。

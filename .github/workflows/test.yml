@@ -1,0 +1,38 @@
+# 插件仓库此前**没有任何 CI**：37+ 项测试存在，但没人自动跑 —— 从 0.6.0 到 0.10.1
+# 十几次发布全靠本地自觉。这个 workflow 补上回归网。
+#
+# 测试全部是**零依赖**的（只 import 仓库内的纯模块），所以不需要 npm install：
+#   · card-limits / tool-schemas / agents-rule / authcode / config-store  → 纯模块
+#   · client-slots → 用垫片执行 lazy-CJS bundle
+#   · tool-schemas 里那条 "用真实校验器再验一遍" 在仓库内会优雅跳过（宿主才提供 dsh-tools）
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 = README 承诺的最低版本；20/22 = 常见 LTS；24 = 当前新版
+        node: [18, 20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: 版本自检
+        run: node --version && npm --version
+      - name: 语法检查（逐文件，早失败早看）
+        run: |
+          for f in src/lib/*.js; do
+            node --check "$f" || exit 1
+          done
+      - name: 单元测试
+        run: npm test

@@ -103,7 +103,7 @@ Get-NetTCPConnection -LocalPort 3080 -State Listen -ErrorAction SilentlyContinue
 
 ```
 hiboard_push
-  name        : 任务名称（卡片标题）
+  name        : 任务名称（卡片标题，上限 64 字符 —— 超长会被自动截断并加省略号）
   content     : Markdown 正文（上限 5000 字符）
   result      : 状态标签，例如「已完成」
   schedule_id : 任意稳定字符串，例如 dsh_worklog      ← 关键：不传则正文不显示
@@ -123,6 +123,7 @@ hiboard_push
 | `Cannot find package 'dsh-harmonyos-hiboard'` | 插件没装进 profile | 重跑第 2 步 |
 | `ERR_PNPM_LINKED_PKG_DIR_NOT_FOUND` | 源码目录路径含空格 | 换到无空格路径（第 1 步） |
 | 推送返回 `0000900034` | 授权码无效/过期 | 重新取码，改 `cordis.patch.yml`，重启 |
+| 推送返回 `0000500002` | 标题超过 64 字符，平台拒收 | 插件会自动截断（0.10.2 起）；若仍出现，核对 `name` 是否绕过 `buildPayload` |
 | 推送返回 `404 {"message":"Not Found"}`（`Server: elb`） | **华为侧 ELB 坏窗口**：请求没到业务服务，与授权码/正文无关 | 见 [`ENDPOINT-NOTES.md`](ENDPOINT-NOTES.md) 第 3 节：用错误 authCode 探一次即可判定。坏窗口会自行恢复；`push-guard` 已把 404 视为可重试（指数退避） |
 | 推送返回 `0000000000` 但卡片只有一行 | 没传 `schedule_id` | 传一个稳定的 schedule_id |
 | `0200100004` + 子码 `82600013` | 平台侧「服务动态推送」开关关闭 | 负一屏 → 我的 → 设置/动态管理 打开 |

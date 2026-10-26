@@ -34,6 +34,7 @@ import { join } from "node:path";
 import { assertObjectJsonSchema, defineTool } from "@deepseek-ai/dsh-tools";
 import z from "@deepseek-ai/schemastery";
 import { maskAuthCode, parseAuthCodeInput } from "./authcode.js";
+import { clampCardName, isCardNameTruncated } from "./card-limits.js";
 import { ensureRule, removeRule, ruleStatus } from "./agents-rule.js";
 import { configPath, readStore, writeStore } from "./config-store.js";
 import { apply as applyPushGuard } from "./push-guard.js";
@@ -186,6 +187,9 @@ const entryDefaults = {
  */
 export function buildPayload({ authCode, name, content, result, scheduleId, source }) {
 	const nowSec = Math.floor(Date.now() / 1000);
+	// 标题同时用作 scheduleTaskName 与 summary，平台上限 64 字符（实测，见 card-limits.js）。
+	// 不裁的话超长会被平台拒收（0000500002）→ **整张卡片丢失**。
+	const cardName = clampCardName(name);
 	return {
 		data: {
 			authCode,
@@ -193,8 +197,8 @@ export function buildPayload({ authCode, name, content, result, scheduleId, sour
 				{
 					msgId: `dsh_${nowSec}_${randomUUID().slice(0, 8)}`,
 					scheduleTaskId: scheduleId ?? "",
-					scheduleTaskName: name,
-					summary: name,
+					scheduleTaskName: cardName,
+					summary: cardName,
 					result,
 					content,
 					source: String(source ?? "").trim() || WIRE_SOURCE,

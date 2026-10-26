@@ -135,6 +135,11 @@ dsh 设置导航里那个「内置插件」页只有只读清单，**永远不�
 跟你的授权码、正文、长度都无关，几十秒到十几分钟会自己好。插件已把 HTTP 404 当作可重试，
 会自动退避重试。判定方法见 [`docs/ENDPOINT-NOTES.md`](docs/ENDPOINT-NOTES.md)。
 
+**卡片标题怎么少了半句、末尾带个 `…`？**
+标题有 **64 字符**的平台上限（实测：64 通过、65 被拒），超长会被平台**整张拒收**
+（`0000500002`）。插件会自动截到 64 并加省略号 —— **截断总比丢卡好**。
+想让标题完整显示，就把 `name` 写短一点（正文不受这个限制，可以照常详细）。
+
 **怎么让它"每轮都推"？**
 保存授权码时插件会**自动**把规则写进全局指令文件 `~/.dsh/AGENTS.md`（默认开启，可一键关掉），
 新会话立刻生效 —— 不需要你手改任何文件。细节见下方
@@ -195,7 +200,7 @@ openclaw config set skills.entries.today-task.config.authCode aaaaaaaaaaaa    # 
 
 | 工具 | 作用 |
 |---|---|
-| `hiboard_push` | 推一张卡片：`name`（标题）、`content`（Markdown，≤5000 字符）、`result`（状态标签）、`schedule_id`（**必传**）、`dry_run`（只校验不发送） |
+| `hiboard_push` | 推一张卡片：`name`（标题，**≤64 字符**，超长会自动截断）、`content`（Markdown，≤5000 字符）、`result`（状态标签）、`schedule_id`（**必传**）、`dry_run`（只校验不发送） |
 | `hiboard_verify` | 发一张「连接测试」卡片，端到端验证授权码与网络 |
 | `hiboard_push_selfcheck` | 自检：兜底是否生效、`hiboard_push` 是否已被接管重试、授权码是否配置、接口是否可达 |
 
@@ -324,8 +329,10 @@ dsh 对插件描述没有本地化钩子（`description` 只能是一个字符�
 | 必填字段 | `msgId` `scheduleTaskId` `scheduleTaskName` `summary` `result` `content` `source` `taskFinishTime` |
 | `source` | 卡片上的**来源 / AI 工具名**（平台按此值做品牌化渲染）。默认 **`"DeepSeek Harness"`**，可在卡片「推送源名称」里改，插件的 `source` 配置项也能改。实测平台接受自定义值，但渲染样式由平台决定，换值后先看一眼真机 |
 | 内容上限 | 5000 字符 |
+| **标题上限** | **64 字符**（`name`，同时用作 `scheduleTaskName` 与 `summary`）。**实测**：64 字符通过、65 字符被拒；按**字符数**算，与字节无关（64 个中文字符 = 192 字节也能过）。插件会自动截到 64 并加 `…`，所以你正常用不会踩到 |
 | 成功码 | `0000000000`（也接受 `"0"`） |
 | 授权码无效 | `0000900034` |
+| 标题超长 | `0000500002` + `Parameter scheduleTaskName size is too long` —— **永久错误，不重试**（重试一万次也一样） |
 | 方法限制 | **仅 POST**（GET 返回 405） |
 | 间歇性 404 | `404 {"message":"Not Found"}` + `Server: elb`（**没有** `x-nuwa-*` 头）= 华为侧 ELB 坏窗口，与密钥/正文/长度无关，几十秒~十几分钟自行恢复 |
 
