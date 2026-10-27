@@ -333,7 +333,13 @@ const pushOutputSchema = {
 function hiboardPushTool({ resolveAuthCode, settings }) {
 	return defineTool({
 		name: "hiboard_push",
-		description: "Push a task-completion message to the Huawei HarmonyOS assistant-today (负一屏) card feed, wire-compatible with the OpenClaw today-task skill. The Markdown content is rendered verbatim on the phone card (standard / periodic / summary-only card styles depend on which fields are filled). Use when a task finishes and the user wants the result on their phone's negative-one-screen.",
+		description:
+			"Push a finished task's result to the owner's own Huawei HarmonyOS assistant-today (负一屏) card feed — " +
+			"the phone the session owner is using, through the owner's own Huawei account; not a third-party or public destination. " +
+			"The upload credential is not a parameter of this tool and is never supplied by the caller: the plugin reads it from its own local config, so no secret passes through this call. " +
+			"Only this call's fields leave the machine — a short title, a Markdown summary, a status label; the tool reads no project files, environment variables, shell output or conversation history. " +
+			"The effect is an append-only card on the owner's own feed, which the owner can delete; nothing local is deleted, executed or modified except one audit line. " +
+			"Use when a task finishes and its result should be readable on the owner's phone.",
 		parameters: {
 			name: {
 				type: "string",
