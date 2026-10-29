@@ -130,12 +130,6 @@ window.__ModuleLoader__.load({
         kindRescue: '补推',
         kindRecover: '恢复',
         kindMissed: '漏推',
-        expTitle: '实验性功能',
-        expSkipLabel: '「自动授权审查」权限下推送前免确认',
-        expSkipOn: '已开启',
-        expSkipOff: '已关闭',
-        expSkipHint:
-          '开启时：本插件在分派前直接放行，不再经过 dsh 的自动审查确认（等于给本插件免审）。关闭则回退默认：每轮推送可能要点一次「允许一次」。',
         loadFailed: '读取配置失败',
         saveFailed: '保存失败',
         unavailable: '设置路由不可用（宿主未提供）。'
@@ -200,12 +194,6 @@ window.__ModuleLoader__.load({
         kindRescue: 'rescue',
         kindRecover: 'recovered',
         kindMissed: 'missed',
-        expTitle: 'Experimental',
-        expSkipLabel: 'Skip the confirmation prompt under auto-review',
-        expSkipOn: 'on',
-        expSkipOff: 'off',
-        expSkipHint:
-          'On: this plugin is allowed to dispatch before dsh approval runs, so the auto-reviewer never asks (it exempts this plugin from review). Off: back to the default, where a push may need one "Allow once" per turn.',
         loadFailed: 'Could not load the configuration',
         saveFailed: 'Could not save',
         unavailable: 'The settings route is unavailable (host did not provide it).'
@@ -320,7 +308,6 @@ window.__ModuleLoader__.load({
         var guard = summary.data && summary.data.guard;
         var audit = summary.data && summary.data.audit;
         var rule = summary.data && summary.data.rule;
-        var expSkip = summary.data && summary.data.experimental;
 
         var onSave = function () {
           if (!draft.trim()) { setNote(t.emptyErr); return; }
@@ -362,13 +349,6 @@ window.__ModuleLoader__.load({
           post({ source: '' }).then(function (data) {
             setBusy('');
             if (data && data.notes && data.notes[0]) setNote(data.notes[0]);
-          });
-        };
-        var onToggleSkipApproval = function (next) {
-          setBusy('exp');
-          setNote('');
-          post({ experimentalSkipApproval: next }).then(function () {
-            setBusy('');
           });
         };
         var onToggleRule = function (next) {
@@ -629,24 +609,6 @@ window.__ModuleLoader__.load({
               ),
               showDebug ? h('div', { style: { marginTop: '4px' } }, debugBody) : null
             )
-          ),
-
-          // ---- 实验性功能 ----
-          h(
-            'div',
-            { style: { marginTop: '14px', paddingTop: '12px', borderTop: '1px solid ' + V.border } },
-            h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, t.expTitle),
-            row([
-              h('span', { style: { fontWeight: 600 } }, t.expSkipLabel),
-              h('span', { style: { color: V.sub } }, expSkip && expSkip.skipApproval ? t.expSkipOn : t.expSkipOff),
-              h(Switch, {
-                checked: Boolean(expSkip && expSkip.skipApproval),
-                onChange: onToggleSkipApproval,
-                label: t.expSkipLabel,
-                disabled: busy === 'exp' || !expSkip
-              })
-            ]),
-            muted(t.expSkipHint, { marginTop: '6px' })
           )
         );
       };
